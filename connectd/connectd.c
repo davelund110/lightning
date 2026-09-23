@@ -2026,6 +2026,8 @@ static void start_shutdown(struct daemon *daemon, const u8 *msg)
 	daemon->shutting_down = true;
 
 	/* No more incoming connections! */
+	for (size_t i = 0; i < tal_count(daemon->listeners); i++)
+		tal_free(daemon->listeners[i]);
 	daemon->listeners = tal_free(daemon->listeners);
 
 	daemon_conn_send(daemon->master,
