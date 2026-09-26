@@ -723,6 +723,7 @@ jobs:
       RUST_PROFILE: small
       SLOW_MACHINE: 1
       TEST_DEBUG: 1
+      ASAN: 1
     needs:
       - check-compiled-source
     strategy:
