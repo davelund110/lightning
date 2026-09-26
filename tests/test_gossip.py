@@ -2316,16 +2316,20 @@ def test_gossip_query_channel_range_cpu_throttle(node_factory, chainparams):
     # at its original value -- it was later tripled, leaving ~10% of margin
     # and a test that passed or failed on how fast the machine was.  The
     # throttle log is the real signal, so assert on that alone.
-    subprocess.run(['devtools/gossipwith',
-                    '--no-gossip',
-                    '--network={}'.format(TEST_NETWORK),
-                    '--filter=264',
-                    '--max-messages=10',
-                    '{}@localhost:{}'.format(l2.info['id'], l2.port)]
-                   + [query] * 10,
-                   check=True, timeout=TIMEOUT, stdout=subprocess.PIPE)
+    # Don't wait for all ten replies: under valgrind each full scan earns
+    # a multi-second throttle, so they can take longer than TIMEOUT.
+    gossipwith = subprocess.Popen(['devtools/gossipwith',
+                                   '--no-gossip',
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--filter=264',
+                                   '--max-messages=10',
+                                   '{}@localhost:{}'.format(l2.info['id'], l2.port)]
+                                  + [query] * 10,
+                                  stdout=subprocess.DEVNULL)
 
     l2.daemon.wait_for_log(r'Throttling outgoing peer .*: too much CPU')
+    gossipwith.kill()
+    gossipwith.wait()
 
 
 def test_generate_gossip_store(node_factory):
