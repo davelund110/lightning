@@ -300,6 +300,7 @@ void setup_peer_gossip_store(struct peer *peer,
 	 */
 	peer->gs.gossip_timer = NULL;
 	peer->gs.active = false;
+	peer->gs.timestamp_filter_set = false;
 
 	spam_new_peer(peer, gossmap);
 	return;
@@ -606,6 +607,15 @@ static void wake_gossip(struct peer *peer)
 	 * fast for our slow tests!  So we only call this one time in 5
 	 * actually twice that, as it's not per-peer! */
 	static int gossip_age_count;
+
+	/* A throttle timer can fire before they ask for gossip: only resume
+	 * any query responses, don't start streaming to them. */
+	if (!peer->gs.timestamp_filter_set) {
+		status_peer_debug(&peer->id, "Throttle over, not streaming: no gossip_timestamp_filter");
+		peer->gs.gossip_timer = NULL;
+		io_wake(peer->peer_outq);
+		return;
+	}
 
 	if (peer->daemon->dev_fast_gossip && gossip_age_count++ % 5 != 0)
 		flush_gossip_filter = false;
@@ -936,6 +946,7 @@ static void handle_gossip_timestamp_filter_in(struct peer *peer, const u8 *msg)
 	/* Make sure we never leave it on an impossible value. */
 	if (peer->gs.timestamp_max < peer->gs.timestamp_min)
 		peer->gs.timestamp_max = UINT32_MAX;
+	peer->gs.timestamp_filter_set = true;
 
 	/* BOLT-gossip-filter-simplify #7:
 	 * The receiver:

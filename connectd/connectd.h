@@ -24,6 +24,8 @@ struct gossip_state {
 	struct oneshot *gossip_timer;
 	/* Timestamp filtering for gossip. */
 	u32 timestamp_min, timestamp_max;
+	/* Have they sent gossip_timestamp_filter (setting the above)? */
+	bool timestamp_filter_set;
 	/* I think this is called "echo cancellation" */
 	struct gossip_rcvd_filter *grf;
 	/* Offset within the gossip_store file */

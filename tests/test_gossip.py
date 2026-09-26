@@ -2332,6 +2332,45 @@ def test_gossip_query_channel_range_cpu_throttle(node_factory, chainparams):
     gossipwith.wait()
 
 
+def test_gossip_throttle_no_unrequested_stream(node_factory, chainparams):
+    """When a throttle ends for a peer which never sent
+    gossip_timestamp_filter, we must not start streaming gossip to it."""
+    chans = [GenChannel(i, i + 1) for i in range(15000)]
+    gsfile, nodemap = generate_gossip_store(chans)
+
+    l1 = node_factory.get_node(options={'disable-plugin': ['recover', 'cln-askrene', 'cln-renepay',
+                                                           'bookkeeper', 'topology', 'cln-xpay'],
+                                        'dev-throttle-gossip': None},
+                               gossip_store_file=gsfile.name,
+                               broken_log='Throttling (incoming|outgoing) peer')
+
+    # gossipwith's usual init, but no gossip_timestamp_filter after it.
+    features = (1 << 7) | (1 << 512)
+    featurebytes = features.to_bytes((features.bit_length() + 7) // 8, 'big')
+    init = '00100000{:04x}{}'.format(len(featurebytes), featurebytes.hex())
+    query = subprocess.run(['devtools/mkquery',
+                            'query_channel_range',
+                            chainparams['chain_hash'],
+                            '1000000', '1'],
+                           check=True, timeout=TIMEOUT,
+                           stdout=subprocess.PIPE).stdout.strip().decode()
+
+    gossipwith = subprocess.Popen(['devtools/gossipwith',
+                                   '--no-init',
+                                   '--hex',
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--filter=256,257,258',
+                                   '--max-messages=1',
+                                   '{}@localhost:{}'.format(l1.info['id'], l1.port),
+                                   init] + [query] * 10,
+                                  stdout=subprocess.PIPE)
+
+    l1.daemon.wait_for_log(r'Throttling outgoing peer .*: too much CPU')
+    l1.daemon.wait_for_log('Throttle over, not streaming: no gossip_timestamp_filter')
+    gossipwith.kill()
+    assert gossipwith.communicate()[0] == b''
+
+
 def test_generate_gossip_store(node_factory):
     l1 = node_factory.get_node(start=False)
     chans = [GenChannel(0, 1),
