@@ -745,6 +745,10 @@ def checkBroken(node):
     if SLOW_MACHINE and VALGRIND:
         slowreq = re.compile("That's weird: Request .* took [0-9]* milliseconds")
         broken_lines = [l for l in broken_lines if not slowreq.search(l)]
+    # Slow machines can blow connectd's per-peer CPU budget on ordinary messages
+    if SLOW_MACHINE:
+        cputhrottle = re.compile("That's weird: Throttling (incoming|outgoing) peer .*: too much CPU")
+        broken_lines = [l for l in broken_lines if not cputhrottle.search(l)]
     if broken_lines:
         print(broken_lines)
         return 1
