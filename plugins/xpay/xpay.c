@@ -3528,6 +3528,8 @@ int main(int argc, char *argv[])
 
 	setup_locale();
 	xpay = tal(NULL, struct xpay);
+	/* block_added can arrive before getchaininfo_done sets it */
+	xpay->blockheight = 0;
 	xpay->take_over_pay = true;
 	xpay->slow_mode = false;
 	xpay->dev_no_age = false;
