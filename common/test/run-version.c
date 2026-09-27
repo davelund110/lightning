@@ -21,6 +21,7 @@ int main(int argc, char *argv[])
 	assert(cmp_release_version("v26.06.8-blake2b.5"));
 	assert(cmp_release_version("v26.06.8-blake2b.") == false);
 	assert(cmp_release_version("v26.06.8-blake2b.5-rc1") == false);
+	assert(cmp_release_version("v26.06.8-blake2b.5-modded") == false);
 	assert(cmp_release_version("v26.06.8-blake2b.5-3-ge2b0374-modded") == false);
 	assert(cmp_release_version("v26.06.8-blake2b") == false);
 
