@@ -4976,8 +4976,12 @@ def test_reestablish_closed_channels(node_factory, bitcoind):
     bitcoind.generate_block(100, wait_for_mempool=1)
     wait_for(lambda: l1.rpc.listclosedchannels()['closedchannels'] != [])
 
-    # l2 reconnects, gets reestablish before error.
-    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    # l2 reconnects, gets reestablish before error.  l1 hangs up right after
+    # the error, so connect can fail with "disconnected during connection"
+    try:
+        l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    except RpcError as err:
+        assert "disconnected during connection" in err.error['message']
     l1.daemon.wait_for_log('Responded to reestablish for long-closed channel')
     l2.daemon.wait_for_log('peer_in WIRE_CHANNEL_REESTABLISH')
     l2.daemon.wait_for_log('peer_in WIRE_ERROR')
