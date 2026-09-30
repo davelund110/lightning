@@ -341,10 +341,11 @@ If you implemented the old version:
   it is unreachable. If you were relying on it to catch a wallet carried
   between chains, it will not.
 
-The check that does still catch a node pointed at the wrong chain is not a
-Lightning check at all: read the block header at the activation height and
-refuse it if it is 80 bytes rather than 164. That touches `chain_hash`
-nowhere and came through this change unaltered.
+The check that does catch a node pointed at the wrong chain is not a
+Lightning check at all: refuse any block at or above the activation height
+whose header is 80 bytes rather than 164. Core Lightning does this for every
+block it adds, so a node whose backend never switched to BLAKE2b stops
+rather than following it. It touches `chain_hash` nowhere.
 
 ### 8b. The distinct BOLT 11 prefix, withdrawn 2026-09-19
 
