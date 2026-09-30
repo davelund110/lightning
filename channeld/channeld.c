@@ -4369,6 +4369,13 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 		peer_failed_warn(peer->pps, &peer->channel_id,
 				 "Splice internal error: mismatched channelid");
 
+	/* We disconnect rather than tx_abort, as for the feerate below. */
+	if (!chainparams->is_elements
+	    && !channel_has(peer->channel, OPT_UNIFIED_SIGS))
+		peer_failed_warn(peer->pps, &peer->channel_id,
+				 "Splice refused: this channel does not use"
+				 " option_unified_sigs");
+
 	if (!pubkey_eq(&peer->splicing->remote_funding_pubkey,
 		       &peer->channel->funding_pubkey[REMOTE]))
 		status_info("Splice peer is rotating funding pubkey");

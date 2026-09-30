@@ -1,6 +1,7 @@
 """Wallet signing must reject foreign sighashes without taking the node down."""
 from fixtures import *  # noqa: F401,F403
-from utils import TEST_NETWORK
+from pyln.client import RpcError
+from utils import TEST_NETWORK, only_one, wait_for
 from psbt_patch import set_input0_sighash, set_input0_nonwitness_utxo
 import pytest
 
@@ -53,3 +54,63 @@ def test_signpsbt_nonwitness_utxo_only_is_not_fatal(node_factory, bitcoind):
 
     l1.rpc.signpsbt(patched)
     assert l1.rpc.getinfo()['id'] is not None
+
+
+# Keeps option_blake2b but drops option_unified_sigs, as builds before
+# v26.06.7-blake2b.4 did.
+NO_UNIFIED = '-514'
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@pytest.mark.parametrize('opener_lacks_it', [False, True])
+def test_new_channel_requires_unified_sigs(node_factory, opener_lacks_it):
+    """Neither side opens a channel without option_unified_sigs."""
+    unified, plain = node_factory.get_nodes(2, opts=[{'allow_warning': True},
+                                                     {'dev-force-features': NO_UNIFIED,
+                                                      'allow_warning': True}])
+    opener, fundee = (plain, unified) if opener_lacks_it else (unified, plain)
+    opener.rpc.connect(fundee.info['id'], 'localhost', fundee.port)
+    opener.fundwallet(2000000)
+
+    with pytest.raises(RpcError):
+        opener.rpc.fundchannel(fundee.info['id'], 500000)
+    for n in (unified, plain):
+        assert not [c for c in n.rpc.listpeerchannels()['channels']
+                    if c['state'] in ('CHANNELD_AWAITING_LOCKIN', 'DUALOPEND_AWAITING_LOCKIN', 'CHANNELD_NORMAL')]
+
+
+def test_no_splice_without_unified_sigs(node_factory, bitcoind, executor):
+    """A channel opened without option_unified_sigs is closed and reopened, never spliced."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     opts={'dev-force-features': NO_UNIFIED,
+                                           'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    names = only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['names']
+    assert 'unified_sigs/even' not in names
+
+    # Both upgrade.  The channel keeps the type it was opened with.
+    for n in (l1, l2):
+        del n.daemon.opts['dev-force-features']
+        n.restart()
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL')
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['names'] == names
+
+    funds = l1.rpc.fundpsbt("111722sat", 0, 0, excess_as_change=True)
+    with pytest.raises(RpcError, match='does not use option_unified_sigs'):
+        l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+
+    # The peer refuses it too, when our own check is skipped.
+    l1.daemon.opts['dev-splice-without-unified-sigs'] = None
+    l1.restart()
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL')
+    # The peer warns and hangs up, which leaves our splice_init waiting, so
+    # do not wait on it: what matters is that no splice starts.
+    executor.submit(l1.rpc.splice_init, chan_id, 100000, funds['psbt'])
+    l2.daemon.wait_for_log('Splice refused: this channel does not use option_unified_sigs')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL')
+    for n in (l1, l2):
+        assert only_one(n.rpc.listpeerchannels()['channels']).get('inflight', []) == []

@@ -362,6 +362,10 @@ struct lightningd {
 	/* Tell openingd/dualopend to accept all, allow sending any. */
 	bool dev_any_channel_type;
 
+	/* Let splice_init start a splice our own check would refuse, so the
+	 * peer's refusal can be tested. */
+	bool dev_splice_without_unified_sigs;
+
 	/* Allow changing of shutdown output point even if dangerous */
 	bool dev_allow_shutdown_destination_change;
 

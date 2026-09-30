@@ -2366,6 +2366,18 @@ static struct command_result *json_splice_init(struct command *cmd,
 				    "Currently waiting on previous splice"
 				    " command to finish.");
 
+	/* A splice co-signs the old funding output without the unified hash
+	 * on such a channel, so its new funding output would be valid for a
+	 * node that has not upgraded as well. */
+	if (!chainparams->is_elements
+	    && !channel_type_has(channel->type, OPT_UNIFIED_SIGS)
+	    && !cmd->ld->dev_splice_without_unified_sigs)
+		return command_fail(cmd,
+				    SPLICE_INVALID_CHANNEL_STATE,
+				    "Channel does not use option_unified_sigs:"
+				    " close it and open a new one instead of"
+				    " splicing");
+
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
 
