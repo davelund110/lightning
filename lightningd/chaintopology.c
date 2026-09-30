@@ -1038,6 +1038,16 @@ static struct block *new_block(struct chain_topology *topo,
 			       unsigned int height)
 {
 	struct block *b = tal(topo, struct block);
+	u32 activation = topo->ld->dev_blake2b_activation_height;
+
+	/* bitcoind reports the same chain name either way, so this is what
+	 * tells a backend that never switched to BLAKE2b from one that did. */
+	if (activation == 0)
+		activation = chainparams->blake2b_activation_height;
+	if (activation != 0 && height >= activation && !blk->hdr.header_v2)
+		fatal("Block %u is at or above the BLAKE2b activation height %u"
+		      " but has an 80-byte header: our Bitcoin backend is not"
+		      " following BLAKE2b proof of work", height, activation);
 
 	bitcoin_block_blkid(blk, &b->blkid);
 	log_debug(topo->log, "Adding block %u: %s",

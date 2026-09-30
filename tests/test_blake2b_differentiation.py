@@ -1,7 +1,7 @@
 """Mandatory peer feature without invoice modifications."""
 from fixtures import *  # noqa: F401,F403
 from pyln.client import RpcError
-from utils import TEST_NETWORK, wait_for
+from utils import TEST_NETWORK, sync_blockheight, wait_for
 import pytest
 
 pytestmark = pytest.mark.skipif(TEST_NETWORK != 'regtest', reason='Blake2b peer features do not apply to Elements')
@@ -93,3 +93,46 @@ def test_blake2b_invreq_without_bit_refused(node_factory):
 
     with pytest.raises(RpcError, match=r'option_blake2b'):
         l2.rpc.fetchinvoice(offer, 1000)
+
+
+NOT_BLAKE2B = 'is at or above the BLAKE2b activation height 110 but has an 80-byte header'
+
+
+@pytest.mark.parametrize('bitcoind', [False], indirect=True)
+def test_backend_without_blake2b_at_startup(node_factory, bitcoind):
+    """A backend that never switched to BLAKE2b must stop us before we sync."""
+    bitcoind.env['BLAKE2B_ACTIVATION_HEIGHT'] = '100000'
+    bitcoind.start()
+    bitcoind.generate_block(120)
+    l1 = node_factory.get_node(start=False, may_fail=True, broken_log='80-byte header',
+                               options={'dev-blake2b-activation-height': 110})
+    l1.daemon.start(wait_for_initialized=False, stderr_redir=True)
+    assert l1.daemon.wait() != 0
+    assert l1.daemon.is_in_stderr(NOT_BLAKE2B)
+
+
+@pytest.mark.parametrize('bitcoind', [False], indirect=True)
+def test_backend_without_blake2b_at_activation(node_factory, bitcoind):
+    """A backend that stays on 80-byte headers past the activation stops us there."""
+    bitcoind.env['BLAKE2B_ACTIVATION_HEIGHT'] = '100000'
+    bitcoind.start()
+    bitcoind.generate_block(101)
+    # Past startup, fatal() aborts, so the crash report is expected too.
+    l1 = node_factory.get_node(start=False, may_fail=True,
+                               broken_log='80-byte header|FATAL SIGNAL|backtrace',
+                               options={'dev-blake2b-activation-height': 110})
+    l1.daemon.start(stderr_redir=True)
+    l1.daemon.wait_for_log('Adding block 101')
+    bitcoind.generate_block(10)
+    assert l1.daemon.wait() != 0
+    assert l1.daemon.is_in_stderr('Block 110 ' + NOT_BLAKE2B)
+    assert l1.daemon.is_in_log('Adding block 109')
+    assert not l1.daemon.is_in_log('Adding block 110')
+
+
+def test_backend_with_blake2b_passes_activation(node_factory, bitcoind):
+    """A BLAKE2b backend crosses the activation without complaint."""
+    l1 = node_factory.get_node(options={'dev-blake2b-activation-height': 110})
+    bitcoind.generate_block(20)
+    sync_blockheight(bitcoind, [l1])
+    assert l1.rpc.getinfo()['blockheight'] >= 120
