@@ -2,36 +2,53 @@
 
 ## Supported Versions
 
-We have a 3 month release cycle, and the last two versions are supported.
+Only the latest `-blake2b.N` release receives security fixes. Upgrade to it before reporting, if you can.
 
 ## Reporting a Vulnerability
 
-To report security vulnerabilities, please send an email to one of the following addresses:
-- `rusty@rustcorp.com.au`
-- `security@blockstream.com`
+Report vulnerabilities in this repository to: security@privkey.io
 
-Note: These email addresses are exclusively for vulnerability reporting.
+A vulnerability in upstream Core Lightning that is not specific to this version belongs with its maintainers, as described in [their security policy](https://github.com/ElementsProject/lightning/blob/master/SECURITY.md).
 
-For all other inquiries/communication, please refer to the [Reach Out to Us](https://github.com/ElementsProject/lightning?tab=readme-ov-file#reach-out-to-us) section in our README.
+**PGP Key:**
+```
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+xjMEaGVRQBYJKwYBBAHaRw8BAQdAF9dwAiS2eOxTwDNy/1LvnTfqP6m8h4rY
+BZxx1v30tJjNKXNlY3VyaXR5QHByaXZrZXkuaW8gPHNlY3VyaXR5QHByaXZr
+ZXkuaW8+wsARBBMWCgCDBYJoZVFAAwsJBwmQuDUnCJWoCwtFFAAAAAAAHAAg
+c2FsdEBub3RhdGlvbnMub3BlbnBncGpzLm9yZ1633ld0W07KI/fGiqv/RPdn
+rKNn456SSIdAiJXTdN5bAxUKCAQWAAIBAhkBApsDAh4BFiEE50kamFXBudeZ
+trSRuDUnCJWoCwsAAELLAQD8gmp8ClfdlOXbOEeFGuvz4LoDlAktfN4L28Wl
+EeedvQD/VrR64FFB0ZsJ4eW0axdjcT3ph4xv96Lqn6tNO0WmUgbOOARoZVFA
+EgorBgEEAZdVAQUBAQdANUQ4xZ3hZzlCsOAJeVN7PkZwEF/Q9DdTZNaUkFXT
+8T8DAQgHwr4EGBYKAHAFgmhlUUAJkLg1JwiVqAsLRRQAAAAAABwAIHNhbHRA
+bm90YXRpb25zLm9wZW5wZ3Bqcy5vcme2RcuuIdqCuXe6p0nzXLc6RICA0iVC
+/6RhJxujpAdrdQKbDBYhBOdJGphVwbnXmba0kbg1JwiVqAsLAABrEwEA1Y9e
+BF6SXFgvOtu+iRdD6e+a1E1l0j3N8qyqb1tJ39MBAMT4UzjZ9IQ2Brz3ZYmV
+kyew0MAIis6DCtVkNduBlBYA
+=3LT9
+-----END PGP PUBLIC KEY BLOCK-----
+```
+
+**Fingerprint:** `E749 1A98 55C1 B9D7 99B6 B491 B835 2708 95A8 0B0B`
+
+**Key Servers:**
+- [keys.openpgp.org](https://keys.openpgp.org/search?q=E7491A9855C1B9D799B6B491B835270895A80B0B)
+- [keyserver.ubuntu.com](https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xE7491A9855C1B9D799B6B491B835270895A80B0B)
+
+**Process:**
+1. Encrypt report with PGP key above
+2. Send to security@privkey.io
+3. Expect acknowledgment within 48 hours
+4. Coordinate disclosure timeline (default: 90 days)
 
 ## Signatures For Releases
 
-The following keys may be used to communicate sensitive information to
-developers, and to validate signatures on releases:
+Releases are signed with `A47D 99B6 DB0D 715D 40C5 9A20 23AE 8A8E A7E2 4E38` (Kyle Santiago, `kyle@privkey.io`), attached to each release as `privkeyio-signing-key.asc`. Verify a download with:
 
-| Name | Email | Fingerprint |
-|------|-------|-------------|
-| Blockstream Security Reporting | `security@blockstream.com` | 1176 542D A98E 71E1 3372  2EF7 4AC8 CC88 6844 A2D6 |
-| Rusty Russell | `rusty@rustcorp.com.au` | 15EE 8D6C AB0E 7F0C F999  BFCB D920 0E6C D1AD B8F1 |
-| Christian Decker | `decker@blockstream.com` | B731 AAC5 21B0 1385 9313  F674 A26D 6D9F E088 ED58 |
-| Lisa Neigut | `niftynei@gmail.com` | 30DE 693A E0DE 9E37 B3E7  EB6B BFF0 F678 10C1 EED1 |
-| Alex Myers | `alex@endothermic.dev` | 0437 4E42 789B BBA9 462E  4767 F3BF 63F2 7474 36AB |
-| Peter Neuroth | `pet.v.ne@gmail.com` | 653B 19F3 3DF7 EFF3 E9D1  C94C C3F2 1EE3 87FF 4CD2 |
-| Shahana Farooqui | `sfarooqui@blockstream.com` | 0CCA 8183 C13A 2389 A9C5  FD29 BFB0 1536 0049 CB56 |
-| Madeline Paech | `madeline@blockstream.com` | 7169 D262 72B5 0A3F 531A  A1C2 A57A FC23 1B58 0804 |
-| Blockstream CLN Release | `cln@blockstream.com` | 616C 52F9 9D06 12B2 A151  B107 4129 A994 AA7E 9852 |
-| Sangbida Chaudhuri | `sangbidac@gmail.com` | 1A37 1C2C 3064 5FAA 91AA  6B7D B643 E612 8422 1961 |
-
-You can import a key by running the following command with that individual’s fingerprint:
-`gpg --keyserver hkps://keys.openpgp.org --recv-keys "<fingerprint>"`.
-Ensure that you put quotes around fingerprints containing spaces.
+```
+gpg --import privkeyio-signing-key.asc
+gpg --verify SHA256SUMS-<version>.asc SHA256SUMS-<version>
+sha256sum -c SHA256SUMS-<version>
+```
