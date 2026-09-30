@@ -50,5 +50,5 @@ Releases are signed with `A47D 99B6 DB0D 715D 40C5 9A20 23AE 8A8E A7E2 4E38` (Ky
 ```
 gpg --import privkeyio-signing-key.asc
 gpg --verify SHA256SUMS-<version>.asc SHA256SUMS-<version>
-sha256sum -c SHA256SUMS-<version>
+sha256sum -c --ignore-missing SHA256SUMS-<version>
 ```

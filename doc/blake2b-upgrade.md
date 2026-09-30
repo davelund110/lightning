@@ -389,8 +389,9 @@ block 961,640, block headers are 164 bytes (the 80-byte layout plus a second
 section), the block id is a BLAKE2b digest of the header rather than SHA256d,
 and the header's time field is offset. A node that reads block headers itself
 (rather than through a node's RPC) needs the Knots definition. Core
-Lightning reads blocks through the backend and does not parse headers itself;
-Lightning Fork's parser is in its btcd fork's `wire` package.
+Lightning fetches blocks through the backend and parses the header in
+`bitcoin/block.c`; Lightning Fork's parser is in its btcd fork's `wire`
+package.
 
 ## 10. What is deliberately unchanged
 
