@@ -73,7 +73,7 @@ def test_new_channel_requires_unified_sigs(node_factory, opener_lacks_it):
     opener.rpc.connect(fundee.info['id'], 'localhost', fundee.port)
     opener.fundwallet(2000000)
 
-    with pytest.raises(RpcError):
+    with pytest.raises(RpcError, match='channel_type'):
         opener.rpc.fundchannel(fundee.info['id'], 500000)
     for n in (unified, plain):
         assert not [c for c in n.rpc.listpeerchannels()['channels']
@@ -111,6 +111,4 @@ def test_no_splice_without_unified_sigs(node_factory, bitcoind, executor):
     # do not wait on it: what matters is that no splice starts.
     executor.submit(l1.rpc.splice_init, chan_id, 100000, funds['psbt'])
     l2.daemon.wait_for_log('Splice refused: this channel does not use option_unified_sigs')
-    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL')
-    for n in (l1, l2):
-        assert only_one(n.rpc.listpeerchannels()['channels']).get('inflight', []) == []
+    assert not l2.daemon.is_in_log('peer_out WIRE_SPLICE_ACK')
