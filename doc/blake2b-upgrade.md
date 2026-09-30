@@ -169,15 +169,18 @@ signature" is wrong, and an implementation that signs its own half `0xa3`
 produces a transaction that is valid and malleable by a third party.
 
 The opt-in is not a property of the commitment type, and is not the
-operator's to choose: it is added to whatever channel type is negotiated,
-named or implicit, whenever both peers support it. Taproot channels are the
+operator's to choose: it is added to every channel type Core Lightning
+proposes or accepts, so it opens no channel with a peer that does not support
+it and accepts none from one. Taproot channels are the
 exception and are refused, because there the commitment signature is a MuSig2
 partial signature over a BIP341 digest, so opting in would be a wire change
 rather than a hash type, and two sides would sign different digests.
 
-A channel funded from coins mined before the proof of work changed, on a
-channel type without the opt-in, remains replayable through its commitment
-transactions. Prefer funding from coins received after the activation.
+A channel opened without the opt-in, as every channel opened with
+`v26.06.7-blake2b.1` to `.3` was, remains replayable through its commitment
+transactions if its funding output is also valid for a node that has not
+upgraded. Close it and open a new one: Core Lightning refuses to splice it,
+from either side, since a splice would carry it into a new funding output.
 
 ## 5. Invoices: `option_blake2b` in the `9` field
 
