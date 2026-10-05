@@ -6,6 +6,7 @@ on:
       - 'v[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+[0-9a-z]+'
+      - 'v*-blake2b.*'
   workflow_dispatch:
     inputs:
       version:
@@ -14,18 +15,22 @@ on:
 
       repository-name:
         description: 'Docker repository name'
-        default: 'elementsproject'
+        default: 'ghcr.io/privkeyio'
         required: false
 
       platforms-to-build:
         description: 'List of platforms to build'
-        default: 'linux/amd64,linux/arm64,linux/arm/v7'
+        default: 'linux/amd64,linux/arm64'
         required: false
   
       push-latest:
         description: 'Push the latest tag also?'
         default: 'false'
         required: false
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build:
@@ -36,14 +41,12 @@ jobs:
         include:
           - target: lightningd
             tag_suffix: ''
-          - target: lightningd-vls-signer
-            tag_suffix: '-vls'
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.ref }}  # Ensures the branch triggering the workflow is checked out
+        ref: ${{ github.event.inputs.version || github.ref }}  # The release being built, or the tag that triggered it
         fetch-depth: 0
 
     - name: Set up QEMU
@@ -52,11 +55,12 @@ jobs:
     - name: Setup Docker Buildx
       uses: docker/setup-buildx-action@v4
 
-    - name: Log in to Docker Hub
+    - name: Log in to GitHub Container Registry
       uses: docker/login-action@v4
       with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set up values for ${{ matrix.target }}
       id: set-values
@@ -76,14 +80,14 @@ jobs:
         if [[ "${{ github.event.inputs.repository-name }}" != "" ]]; then
           REPONAME=${{ github.event.inputs.repository-name }}
         else
-          REPONAME="elementsproject"
+          REPONAME="ghcr.io/privkeyio"
         fi
         echo "REPONAME=$REPONAME" >> $GITHUB_ENV
 
         if [[ "${{ github.event.inputs.platforms-to-build }}" != "" ]]; then
           PLATFORMS=${{ github.event.inputs.platforms-to-build }}
         else
-          PLATFORMS="linux/amd64,linux/arm64,linux/arm/v7"
+          PLATFORMS="linux/amd64,linux/arm64"
         fi
         echo "PLATFORMS=$PLATFORMS" >> $GITHUB_ENV
 
