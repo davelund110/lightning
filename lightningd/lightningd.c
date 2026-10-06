@@ -149,6 +149,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->dev_hsmd_no_preapprove_check = false;
 	ld->dev_hsmd_fail_preapprove = false;
 	ld->dev_hsmd_warn_on_overgrind = false;
+	ld->dev_hsmd_independent_secrets_sender = false;
 	ld->dev_handshake_no_reply = false;
 	ld->dev_strict_forwarding = false;
 	ld->dev_limit_connections_inflight = false;
@@ -1170,6 +1171,27 @@ static void setup_fd_limit(struct lightningd *ld, size_t num_channels)
 	}
 }
 
+/*~ --dev-independent-secrets-sender changes how hsmd derives the
+ * per-commitment secrets of every channel.  Flipping it under a channel which
+ * is open or still being resolved would make that channel fail at its next
+ * update, and leave the outputs of our own unilateral close unspendable, so
+ * we refuse to start. */
+static void check_dev_independent_secrets_sender(struct lightningd *ld,
+						 size_t num_channels)
+{
+	s64 was = db_get_intvar(ld->wallet->db,
+				"dev_independent_secrets_sender", 0);
+
+	if (was == ld->dev_hsmd_independent_secrets_sender)
+		return;
+	if (num_channels != 0)
+		errx(1, "Our channels were made with --dev-independent-secrets-sender"
+		     " %s: it can't change while any is open or being resolved",
+		     was ? "set" : "unset");
+	db_set_intvar(ld->wallet->db, "dev_independent_secrets_sender",
+		      ld->dev_hsmd_independent_secrets_sender);
+}
+
 int main(int argc, char *argv[])
 {
 	struct lightningd *ld;
@@ -1364,6 +1386,7 @@ int main(int argc, char *argv[])
 	 *  know the blockheight. */
 	unconnected_htlcs_in = notleak(load_channels_from_wallet(ld,
 								 &num_channels));
+	check_dev_independent_secrets_sender(ld, num_channels);
 	db_commit_transaction(ld->wallet->db);
 
 	/*~ Now we have channels, try to ensure we have enough file descriptors
