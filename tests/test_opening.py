@@ -2267,7 +2267,7 @@ def test_zeroconf_open(bitcoind, node_factory):
     # plugin
     ret = l2.rpc.fundchannel(l3.info['id'], 'all', mindepth=0)
     if TEST_NETWORK == 'regtest':
-        channel_type = {'bits': [12, 22, 50, 514], 'names': ['static_remotekey/even', 'anchors/even', 'zeroconf/even', 'unified_sigs/even']}
+        channel_type = {'bits': [12, 22, 50, 266, 514], 'names': ['static_remotekey/even', 'anchors/even', 'zeroconf/even', 'independent_secrets/even', 'unified_sigs/even']}
     else:
         channel_type = {'bits': [12, 50], 'names': ['static_remotekey/even', 'zeroconf/even']}
     assert ret['channel_type'] == channel_type
@@ -3237,6 +3237,8 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
     ANCHORS_ZERO_FEE_HTLC_TX = 22
     ZEROCONF = 50
     UNIFIED_SIGS = 514
+    # Both sides have it, so it is added to any type we name.
+    INDEPENDENT_SECRETS = 266
 
     for zeroconf in ([], [ZEROCONF]):
         for ctype in ([STATIC_REMOTEKEY, UNIFIED_SIGS],
@@ -3244,8 +3246,8 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
             ret = l1.rpc.fundchannel_start(l2.info['id'], FUNDAMOUNT,
                                            channel_type=ctype + zeroconf)
             # We get zeroconf even without asking for it.
-            assert ret['channel_type']['bits'] == sorted(ctype + [ZEROCONF])
-            assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == sorted(ctype + [ZEROCONF])
+            assert ret['channel_type']['bits'] == sorted(ctype + [ZEROCONF, INDEPENDENT_SECRETS])
+            assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == sorted(ctype + [ZEROCONF, INDEPENDENT_SECRETS])
             # Note: l2 doesn't show it in listpeerchannels yet...
             l1.rpc.fundchannel_cancel(l2.info['id'])
 
@@ -3259,9 +3261,9 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
     psbt = l1.rpc.fundpsbt(FUNDAMOUNT - 1000, '253perkw', 250, reserve=0)['psbt']
     for ctype in ([STATIC_REMOTEKEY, UNIFIED_SIGS], [STATIC_REMOTEKEY, ANCHORS_ZERO_FEE_HTLC_TX, UNIFIED_SIGS]):
         ret = l1.rpc.openchannel_init(l3.info['id'], FUNDAMOUNT - 1000, psbt, channel_type=ctype)
-        assert ret['channel_type']['bits'] == ctype
-        assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == ctype
-        assert only_one(l3.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == ctype
+        assert ret['channel_type']['bits'] == sorted(ctype + [INDEPENDENT_SECRETS])
+        assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == sorted(ctype + [INDEPENDENT_SECRETS])
+        assert only_one(l3.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == sorted(ctype + [INDEPENDENT_SECRETS])
         l1.rpc.openchannel_abort(ret['channel_id'])
 
     # Old anchors not supported for new channels
@@ -3284,7 +3286,7 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
     l1.start()
     l1.connect(l2)
 
-    with pytest.raises(RpcError, match=r'They sent ERROR .*: You gave bad parameters: Did not support channel_type \[12,20,514\]'):
+    with pytest.raises(RpcError, match=r'They sent ERROR .*: You gave bad parameters: Did not support channel_type \[12,20,266,514\]'):
         l1.rpc.fundchannel_start(l2.info['id'], FUNDAMOUNT, channel_type=[STATIC_REMOTEKEY, ANCHORS_OLD, UNIFIED_SIGS])
 
     # Now make l2 accept it!
@@ -3294,8 +3296,8 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
     l1.connect(l2)
 
     ret = l1.rpc.fundchannel_start(l2.info['id'], FUNDAMOUNT, channel_type=[STATIC_REMOTEKEY, ANCHORS_OLD, UNIFIED_SIGS])
-    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, ANCHORS_OLD, ZEROCONF, UNIFIED_SIGS]
-    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, ANCHORS_OLD, ZEROCONF, UNIFIED_SIGS]
+    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, ANCHORS_OLD, ZEROCONF, INDEPENDENT_SECRETS, UNIFIED_SIGS]
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, ANCHORS_OLD, ZEROCONF, INDEPENDENT_SECRETS, UNIFIED_SIGS]
     # Note: l3 doesn't show it in listpeerchannels yet...
     l1.rpc.fundchannel_cancel(l2.info['id'])
 
@@ -3303,9 +3305,9 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
 
     # Works with fundchannel / multifundchannel
     ret = l1.rpc.fundchannel(l2.info['id'], FUNDAMOUNT // 3, channel_type=[STATIC_REMOTEKEY, UNIFIED_SIGS])
-    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, ZEROCONF, UNIFIED_SIGS]
-    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, ZEROCONF, UNIFIED_SIGS]
-    assert only_one(l2.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, UNIFIED_SIGS]
+    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, ZEROCONF, INDEPENDENT_SECRETS, UNIFIED_SIGS]
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, ZEROCONF, INDEPENDENT_SECRETS, UNIFIED_SIGS]
+    assert only_one(l2.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, INDEPENDENT_SECRETS, UNIFIED_SIGS]
     # FIXME: Check type is actually correct!
 
     # Mine that so we can spend change.
@@ -3314,9 +3316,9 @@ def test_opening_explicit_channel_type(node_factory, bitcoind):
 
     l1.connect(l3)
     ret = l1.rpc.fundchannel(l3.info['id'], FUNDAMOUNT // 3, channel_type=[STATIC_REMOTEKEY, UNIFIED_SIGS])
-    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, UNIFIED_SIGS]
-    assert only_one(l1.rpc.listpeerchannels(l3.info['id'])['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, UNIFIED_SIGS]
-    assert only_one(l3.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, UNIFIED_SIGS]
+    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY, INDEPENDENT_SECRETS, UNIFIED_SIGS]
+    assert only_one(l1.rpc.listpeerchannels(l3.info['id'])['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, INDEPENDENT_SECRETS, UNIFIED_SIGS]
+    assert only_one(l3.rpc.listpeerchannels()['channels'])['channel_type']['bits'] == [STATIC_REMOTEKEY, INDEPENDENT_SECRETS, UNIFIED_SIGS]
 
 
 def test_multifunding_all_amount(node_factory, bitcoind):
@@ -3856,7 +3858,8 @@ def test_zero_length_upfront_shutdown_script(node_factory, bitcoind):
     ret = l1.rpc.fundchannel(l2.info['id'], FUNDAMOUNT, push_msat=0,
                              channel_type=[STATIC_REMOTEKEY] + ([514] if TEST_NETWORK == 'regtest' else []))
     cid = ret['channel_id']
-    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY] + ([514] if TEST_NETWORK == 'regtest' else [])
+    # option_independent_secrets joins the named type, as both sides have it.
+    assert ret['channel_type']['bits'] == [STATIC_REMOTEKEY] + ([266, 514] if TEST_NETWORK == 'regtest' else [])
     assert ANCHORS_ZERO_FEE_HTLC_TX not in ret['channel_type']['bits']
 
     # Hang on to commitment 0, before anything moves the channel off it.

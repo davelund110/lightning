@@ -11117,6 +11117,12 @@ pub mod responses {
 	}
 
 	#[derive(Clone, Debug, Deserialize, Serialize)]
+	pub struct ListconfigsConfigsDisableindependentsecrets {
+	    pub set: bool,
+	    pub source: String,
+	}
+
+	#[derive(Clone, Debug, Deserialize, Serialize)]
 	pub struct ListconfigsConfigsDisablempp {
 	    #[serde(skip_serializing_if = "Option::is_none")]
 	    pub plugin: Option<String>,
@@ -11509,6 +11515,9 @@ pub mod responses {
 	    #[serde(rename = "disable-dns")]
 	    #[serde(skip_serializing_if = "Option::is_none")]
 	    pub disable_dns: Option<ListconfigsConfigsDisabledns>,
+	    #[serde(rename = "disable-independent-secrets")]
+	    #[serde(skip_serializing_if = "Option::is_none")]
+	    pub disable_independent_secrets: Option<ListconfigsConfigsDisableindependentsecrets>,
 	    #[serde(rename = "disable-mpp")]
 	    #[serde(skip_serializing_if = "Option::is_none")]
 	    pub disable_mpp: Option<ListconfigsConfigsDisablempp>,

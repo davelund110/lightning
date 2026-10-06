@@ -3309,6 +3309,16 @@ impl From<responses::ListconfigsConfigsDisabledns> for pb::ListconfigsConfigsDis
 }
 
 #[allow(unused_variables)]
+impl From<responses::ListconfigsConfigsDisableindependentsecrets> for pb::ListconfigsConfigsDisableindependentsecrets {
+    fn from(c: responses::ListconfigsConfigsDisableindependentsecrets) -> Self {
+        Self {
+            set: c.set, // Rule #2 for type boolean
+            source: c.source, // Rule #2 for type string
+        }
+    }
+}
+
+#[allow(unused_variables)]
 impl From<responses::ListconfigsConfigsDisablempp> for pb::ListconfigsConfigsDisablempp {
     fn from(c: responses::ListconfigsConfigsDisablempp) -> Self {
         Self {
@@ -3803,6 +3813,7 @@ impl From<responses::ListconfigsConfigs> for pb::ListconfigsConfigs {
             database_upgrade: c.database_upgrade.map(|v| v.into()),
             developer: c.developer.map(|v| v.into()),
             disable_dns: c.disable_dns.map(|v| v.into()),
+            disable_independent_secrets: c.disable_independent_secrets.map(|v| v.into()),
             disable_mpp: c.disable_mpp.map(|v| v.into()),
             disable_plugin: c.disable_plugin.map(|v| v.into()),
             encrypted_hsm: c.encrypted_hsm.map(|v| v.into()),

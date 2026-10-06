@@ -2530,6 +2530,7 @@
             "ListConfigs.configs.database-upgrade": 28,
             "ListConfigs.configs.developer": 2,
             "ListConfigs.configs.disable-dns": 53,
+            "ListConfigs.configs.disable-independent-secrets": 76,
             "ListConfigs.configs.disable-mpp": 4,
             "ListConfigs.configs.disable-plugin": 16,
             "ListConfigs.configs.disable-source": 73,
@@ -2686,6 +2687,10 @@
         "ListconfigsConfigsDisable-dns": {
             "ListConfigs.configs.disable-dns.set": 1,
             "ListConfigs.configs.disable-dns.source": 2
+        },
+        "ListconfigsConfigsDisable-independent-secrets": {
+            "ListConfigs.configs.disable-independent-secrets.set": 1,
+            "ListConfigs.configs.disable-independent-secrets.source": 2
         },
         "ListconfigsConfigsDisable-mpp": {
             "ListConfigs.configs.disable-mpp.plugin": 3,
@@ -10033,6 +10038,18 @@
         },
         "ListConfigs.configs.disable-dns.source": {
             "added": "v23.08",
+            "deprecated": null
+        },
+        "ListConfigs.configs.disable-independent-secrets": {
+            "added": "v26.06.9-blake2b.8",
+            "deprecated": null
+        },
+        "ListConfigs.configs.disable-independent-secrets.set": {
+            "added": "v26.06.9-blake2b.8",
+            "deprecated": null
+        },
+        "ListConfigs.configs.disable-independent-secrets.source": {
+            "added": "v26.06.9-blake2b.8",
             "deprecated": null
         },
         "ListConfigs.configs.disable-mpp": {

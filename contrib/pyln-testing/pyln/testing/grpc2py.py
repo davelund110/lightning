@@ -2384,6 +2384,13 @@ def listconfigs_configs_disable_dns2py(m):
     })
 
 
+def listconfigs_configs_disable_independent_secrets2py(m):
+    return remove_default({
+        "set": m.set,  # PrimitiveField in generate_composite
+        "source": m.source,  # PrimitiveField in generate_composite
+    })
+
+
 def listconfigs_configs_disable_mpp2py(m):
     return remove_default({
         "plugin": m.plugin,  # PrimitiveField in generate_composite

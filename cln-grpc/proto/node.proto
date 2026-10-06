@@ -3236,6 +3236,7 @@ message ListconfigsConfigs {
 	optional ListconfigsConfigsAutoconnectseekerpeers autoconnect_seeker_peers = 71;
 	optional ListconfigsConfigsCurrencyrateaddsource currencyrate_add_source = 74;
 	optional ListconfigsConfigsCurrencyratedisablesource currencyrate_disable_source = 75;
+	optional ListconfigsConfigsDisableindependentsecrets disable_independent_secrets = 76;
 }
 
 message ListconfigsConfigsAddr {
@@ -3366,6 +3367,11 @@ message ListconfigsConfigsDeveloper {
 }
 
 message ListconfigsConfigsDisabledns {
+	bool set = 1;
+	string source = 2;
+}
+
+message ListconfigsConfigsDisableindependentsecrets {
 	bool set = 1;
 	string source = 2;
 }

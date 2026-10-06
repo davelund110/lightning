@@ -1281,6 +1281,14 @@ static char *opt_set_shutdown_wrong_funding(struct lightningd *ld)
 	return NULL;
 }
 
+static char *opt_set_disable_independent_secrets(struct lightningd *ld)
+{
+	feature_set_sub(ld->our_features,
+			take(feature_set_for_feature(NULL,
+						     OPTIONAL_FEATURE(OPT_INDEPENDENT_SECRETS))));
+	return NULL;
+}
+
 static char *opt_set_peer_storage(struct lightningd *ld)
 {
 	if (!opt_deprecated_ok(ld, "experimental-peer-storage", NULL,
@@ -1518,6 +1526,12 @@ static void register_opts(struct lightningd *ld)
 	opt_register_early_noarg("--experimental-peer-storage",
 				 opt_set_peer_storage, ld,
 				 opt_hidden);
+	/* This affects our features, so set early. */
+	opt_register_early_noarg("--disable-independent-secrets",
+				 opt_set_disable_independent_secrets, ld,
+				 "Don't offer option_independent_secrets, so new"
+				 " channels keep requiring the peer's"
+				 " per-commitment secrets to come from a shachain");
 
 	clnopt_noarg("--help|-h", OPT_EXITS,
 		     opt_lightningd_usage, ld, "Print this message.");
@@ -1849,6 +1863,10 @@ void handle_early_opts(struct lightningd *ld, int argc, char *argv[])
 			take(feature_set_for_feature(NULL, OPT_BLAKE2B)));
 		feature_set_sub(ld->our_features,
 			take(feature_set_for_feature(NULL, OPT_UNIFIED_SIGS)));
+		/* Like the two above, this is for the BLAKE2b network. */
+		feature_set_sub(ld->our_features,
+			take(feature_set_for_feature(NULL,
+						     OPTIONAL_FEATURE(OPT_INDEPENDENT_SECRETS))));
 		feature_set_sub(ld->our_features,
 				feature_set_for_feature(tmpctx,
 							OPTIONAL_FEATURE(OPT_ANCHORS_ZERO_FEE_HTLC_TX)));

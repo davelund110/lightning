@@ -913,6 +913,8 @@ static struct feature_set *default_features(const tal_t *ctx)
 	static const u32 features[] = {
 		COMPULSORY_FEATURE(OPT_BLAKE2B),
 	COMPULSORY_FEATURE(OPT_UNIFIED_SIGS),
+		/* --disable-independent-secrets removes this. */
+		OPTIONAL_FEATURE(OPT_INDEPENDENT_SECRETS),
 		COMPULSORY_FEATURE(OPT_DATA_LOSS_PROTECT),
 		OPTIONAL_FEATURE(OPT_UPFRONT_SHUTDOWN_SCRIPT),
 		OPTIONAL_FEATURE(OPT_GOSSIP_QUERIES),

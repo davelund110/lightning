@@ -444,6 +444,19 @@ use the RPC call lightning-setchannel(7).
 we tell our peer that this is how long they'll have to wait if they
 perform a unilateral close.
 
+* **disable-independent-secrets**
+
+  By default we offer `option_independent_secrets` (feature 267), and a new
+channel with a peer which offers it too uses it: the peer may then generate its
+per-commitment secrets any way it likes, rather than from a shachain.  Secrets
+which fit a shachain still go in one, as they always do from a peer which uses
+one; from the first which doesn't, we store every secret it reveals (about 60
+bytes each, in sqlite3) until the channel has closed and its outputs are
+resolved, then only the last.  With this option we don't offer it, so new
+channels keep requiring the peer's secrets to come from a shachain: for
+example, if an external signer checks them against one.  Channels already open
+are unaffected.  Not offered on Liquid.  (Added in v26.06.9-blake2b.8).
+
 * (deprecated in v23.05) **max-locktime-blocks**=*BLOCKS*
 
   The longest our funds can be delayed (ie. the longest

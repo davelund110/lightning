@@ -46,8 +46,9 @@ def expected_peer_features(extra=[]):
         # option_dual_fund
         features += [29]
     if TEST_NETWORK != 'liquid-regtest':
-        # Anchors, except for elements
-        features += [23, 512, 515]
+        # Anchors, option_blake2b, option_unified_sigs and
+        # option_independent_secrets, except for elements
+        features += [23, 267, 512, 515]
     return hex_bits(features + extra)
 
 
@@ -60,8 +61,9 @@ def expected_node_features(extra=[]):
         # option_dual_fund
         features += [29]
     if TEST_NETWORK != 'liquid-regtest':
-        # Anchors, except for elements
-        features += [23, 512, 515]
+        # Anchors, option_blake2b, option_unified_sigs and
+        # option_independent_secrets, except for elements
+        features += [23, 267, 512, 515]
     return hex_bits(features + extra)
 
 
