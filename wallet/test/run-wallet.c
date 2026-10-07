@@ -1565,12 +1565,19 @@ static int count_htlc_sigs(struct wallet *w, u64 channel_dbid)
 }
 
 static bool test_htlcsigs_confirm_inflight(struct wallet *w,
-					   struct channel *chan)
+					   struct channel *chan,
+					   bool anchors)
 {
 	struct bitcoin_outpoint winner, same_txid, same_outnum, neither;
 	struct bitcoin_signature *active, *win, *lose, *loaded, *confirmed;
 	const struct channel_type *original_type = chan->type;
-	struct channel_type *unified_type = channel_type_static_remotekey(tmpctx);
+	struct channel_type *unified_type = anchors
+		? channel_type_anchors_zero_fee_htlc(tmpctx)
+		: channel_type_static_remotekey(tmpctx);
+	/* With anchors the counterparty's HTLC sigs are SINGLE|ANYONECANPAY */
+	enum sighash_type expected = anchors
+		? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY | SIGHASH_UNIFIED)
+		: (SIGHASH_ALL | SIGHASH_UNIFIED);
 
 	channel_type_set_unified_sigs(unified_type);
 	chan->type = unified_type;
@@ -1610,7 +1617,7 @@ static bool test_htlcsigs_confirm_inflight(struct wallet *w,
 	CHECK(memeq(&loaded[0].s, sizeof(loaded[0].s), &win[0].s, sizeof(win[0].s)));
 	CHECK(tal_count(confirmed) == 1);
 	CHECK(memeq(&confirmed[0].s, sizeof(confirmed[0].s), &win[0].s, sizeof(win[0].s)));
-	CHECK(confirmed[0].sighash_type == (SIGHASH_ALL | SIGHASH_UNIFIED));
+	CHECK(confirmed[0].sighash_type == expected);
 	CHECK(loaded[0].sighash_type == confirmed[0].sighash_type);
 
 	/* Old active set and losing inflights are gone */
@@ -1732,7 +1739,8 @@ static bool test_channel_inflight_crud(struct lightningd *ld, const tal_t *ctx, 
 	db_begin_transaction(w->db);
 	CHECK(!wallet_err);
 	wallet_channel_insert(w, chan);
-	CHECK(test_htlcsigs_confirm_inflight(w, chan));
+	CHECK(test_htlcsigs_confirm_inflight(w, chan, false));
+	CHECK(test_htlcsigs_confirm_inflight(w, chan, true));
 
 	/* info for the inflight */
 	funding_sats = AMOUNT_SAT(222222);
