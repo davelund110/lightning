@@ -177,6 +177,53 @@ def test_unified_onchain_htlc_timeout(node_factory, bitcoind, executor):
 
 
 @pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+def test_unified_htlc_timeout_after_splice(node_factory, bitcoind, executor):
+    """An HTLC in flight across a splice times out on chain with the splice's HTLC sigs."""
+    a, b = node_factory.line_graph(2, wait_for_announce=True,
+                                   opts=[{'broken_log': '.*'}, {'broken_log': '.*'}])
+    assert 'unified_sigs/even' in only_one(a.rpc.listpeerchannels()['channels'])['channel_type']['names']
+
+    b.rpc.dev_ignore_htlcs(id=a.info['id'], ignore=True)
+    # Worth enough that timing it out on chain is not refused as uneconomic.
+    inv = b.rpc.invoice(10**8, 'stuck_across_splice', 'desc')
+    executor.submit(a.rpc.xpay, inv['bolt11'])
+    b.daemon.wait_for_log('their htlc 0 dev_ignore_htlcs')
+
+    chan_id = a.get_channel_id(b)
+    funds = a.rpc.fundpsbt("111722sat", 0, 0, excess_as_change=True)
+    result = a.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    result = a.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is False
+    result = a.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = a.rpc.signpsbt(result['psbt'])
+    result = a.rpc.splice_signed(chan_id, result['signed_psbt'])
+    a.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    b.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+
+    bitcoind.generate_block(1, wait_for_mempool=result['txid'])
+    sync_blockheight(bitcoind, [a, b])
+    bitcoind.generate_block(5)
+    a.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    b.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+
+    # Close on the splice's first commitment, so timing the HTLC out uses the
+    # HTLC sigs promoted from the splice rather than ones from a later update.
+    a.rpc.dev_fail(b.info['id'])
+    a.wait_for_channel_onchain(b.info['id'])
+    bitcoind.generate_block(1)
+    a.daemon.wait_for_log(' to ONCHAIN')
+
+    _, txid, blocks = a.wait_for_onchaind_tx('OUR_HTLC_TIMEOUT_TX', 'OUR_UNILATERAL/OUR_HTLC')
+    # The timeout is deferred until the HTLC expires.
+    bitcoind.generate_block(blocks)
+    sync_blockheight(bitcoind, [a])
+    mined = a.mine_txid_or_rbf(txid)
+    assert_unified_witnesses(bitcoind, mined, 1)
+
+
+@pytest.mark.openchannel('v1')
 def test_unified_onchain_htlc_success(node_factory, bitcoind):
     """Claiming an HTLC on chain with the preimage must use unified signing."""
     # a -> b -> c, and b drops to chain after learning the preimage from c.

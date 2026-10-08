@@ -932,7 +932,7 @@ static struct command_result *json_getroutes(struct command *cmd,
 				    "amount must be non-zero");
 	}
 
-	if (maxparts == 0) {
+	if (*maxparts == 0) {
 		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
 				    "maxparts must be non-zero");
 	}
@@ -941,6 +941,11 @@ static struct command_result *json_getroutes(struct command *cmd,
 		return command_fail(cmd, PAY_USER_ERROR,
 				    "maximum delay allowed is %d",
 				    maxdelay_allowed);
+	}
+
+	if (node_id_eq(source, dest)) {
+		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+				    "source and destination must be different");
 	}
 
 	if (command_check_only(cmd))

@@ -222,6 +222,11 @@ void connect_succeeded(struct lightningd *ld UNNEEDED, const struct peer *peer U
 		       bool incoming UNNEEDED,
 		       const struct wireaddr_internal *addr UNNEEDED)
 { fprintf(stderr, "connect_succeeded called!\n"); abort(); }
+/* Generated stub for connectd_connect_subd */
+void connectd_connect_subd(const struct peer *peer UNNEEDED,
+			   const struct channel_id *channel_id UNNEEDED,
+			   int fd UNNEEDED)
+{ fprintf(stderr, "connectd_connect_subd called!\n"); abort(); }
 /* Generated stub for connectd_connect_to_peer */
 void connectd_connect_to_peer(struct lightningd *ld UNNEEDED,
 			      const struct peer *peer UNNEEDED,
@@ -636,9 +641,6 @@ struct subd_req *subd_req_(const tal_t *ctx UNNEEDED,
 	       void (*replycb)(struct subd * UNNEEDED, const u8 * UNNEEDED, const int * UNNEEDED, void *) UNNEEDED,
 	       void *replycb_data TAKES UNNEEDED)
 { fprintf(stderr, "subd_req_ called!\n"); abort(); }
-/* Generated stub for subd_send_fd */
-void subd_send_fd(struct subd *sd UNNEEDED, int fd UNNEEDED)
-{ fprintf(stderr, "subd_send_fd called!\n"); abort(); }
 /* Generated stub for subd_send_msg */
 void subd_send_msg(struct subd *sd UNNEEDED, const u8 *msg_out UNNEEDED)
 { fprintf(stderr, "subd_send_msg called!\n"); abort(); }
@@ -686,9 +688,6 @@ u8 *towire_channeld_sending_commitsig_reply(const tal_t *ctx UNNEEDED)
 /* Generated stub for towire_connectd_disconnect_peer */
 u8 *towire_connectd_disconnect_peer(const tal_t *ctx UNNEEDED, const struct node_id *id UNNEEDED, u64 counter UNNEEDED)
 { fprintf(stderr, "towire_connectd_disconnect_peer called!\n"); abort(); }
-/* Generated stub for towire_connectd_peer_connect_subd */
-u8 *towire_connectd_peer_connect_subd(const tal_t *ctx UNNEEDED, const struct node_id *id UNNEEDED, u64 counter UNNEEDED, const struct channel_id *channel_id UNNEEDED)
-{ fprintf(stderr, "towire_connectd_peer_connect_subd called!\n"); abort(); }
 /* Generated stub for towire_connectd_peer_send_msg */
 u8 *towire_connectd_peer_send_msg(const tal_t *ctx UNNEEDED, const struct node_id *id UNNEEDED, u64 counter UNNEEDED, const u8 *msg UNNEEDED)
 { fprintf(stderr, "towire_connectd_peer_send_msg called!\n"); abort(); }
@@ -1566,10 +1565,22 @@ static int count_htlc_sigs(struct wallet *w, u64 channel_dbid)
 }
 
 static bool test_htlcsigs_confirm_inflight(struct wallet *w,
-					   struct channel *chan)
+					   struct channel *chan,
+					   bool anchors)
 {
 	struct bitcoin_outpoint winner, same_txid, same_outnum, neither;
-	struct bitcoin_signature *active, *win, *lose, *loaded;
+	struct bitcoin_signature *active, *win, *lose, *loaded, *confirmed;
+	const struct channel_type *original_type = chan->type;
+	struct channel_type *unified_type = anchors
+		? channel_type_anchors_zero_fee_htlc(tmpctx)
+		: channel_type_static_remotekey(tmpctx);
+	/* With anchors the counterparty's HTLC sigs are SINGLE|ANYONECANPAY */
+	enum sighash_type expected = anchors
+		? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY | SIGHASH_UNIFIED)
+		: (SIGHASH_ALL | SIGHASH_UNIFIED);
+
+	channel_type_set_unified_sigs(unified_type);
+	chan->type = unified_type;
 
 	memset(&winner.txid, 1, sizeof(winner.txid));
 	winner.n = 0;
@@ -1597,13 +1608,17 @@ static bool test_htlcsigs_confirm_inflight(struct wallet *w,
 	/* The active set and all four inflight candidates were stored */
 	CHECK(count_htlc_sigs(w, chan->dbid) == 5);
 
-	wallet_htlcsigs_confirm_inflight(w, chan, &winner);
+	confirmed = wallet_htlcsigs_confirm_inflight(tmpctx, w, chan, &winner);
 
-	/* Winner's sigs are now the active set */
+	/* Winner's sigs are now the active set, and that's what we got back */
 	loaded = wallet_htlc_sigs_load(tmpctx, w, chan->dbid,
-				       channel_type_static_remotekey(tmpctx));
+				       chan->type);
 	CHECK(tal_count(loaded) == 1);
 	CHECK(memeq(&loaded[0].s, sizeof(loaded[0].s), &win[0].s, sizeof(win[0].s)));
+	CHECK(tal_count(confirmed) == 1);
+	CHECK(memeq(&confirmed[0].s, sizeof(confirmed[0].s), &win[0].s, sizeof(win[0].s)));
+	CHECK(confirmed[0].sighash_type == expected);
+	CHECK(loaded[0].sighash_type == confirmed[0].sighash_type);
 
 	/* Old active set and losing inflights are gone */
 	CHECK(count_htlc_sigs(w, chan->dbid) == 1);
@@ -1611,6 +1626,7 @@ static bool test_htlcsigs_confirm_inflight(struct wallet *w,
 	/* Leave the table matching chan so later load/compare checks in the
 	 * caller do not see our fixture rows. */
 	wallet_htlc_sigs_save(w, chan->dbid, chan->last_htlc_sigs);
+	chan->type = original_type;
 	return true;
 }
 
@@ -1723,7 +1739,8 @@ static bool test_channel_inflight_crud(struct lightningd *ld, const tal_t *ctx, 
 	db_begin_transaction(w->db);
 	CHECK(!wallet_err);
 	wallet_channel_insert(w, chan);
-	CHECK(test_htlcsigs_confirm_inflight(w, chan));
+	CHECK(test_htlcsigs_confirm_inflight(w, chan, false));
+	CHECK(test_htlcsigs_confirm_inflight(w, chan, true));
 
 	/* info for the inflight */
 	funding_sats = AMOUNT_SAT(222222);
