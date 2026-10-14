@@ -287,8 +287,9 @@ about a bit it has never heard of.
 
 Existing channels are unaffected either way. The type is fixed when the
 channel is opened and is never renegotiated, so upgrading does not change a
-channel that is already open, and a peer that does not signal the bit is
-offered an ordinary channel rather than refused.
+channel that is already open. A peer that does not signal the bit can still
+connect and keeps its existing channels, but no new channel is opened with it
+in either direction.
 
 ## 8. What has been withdrawn, and what to do about it
 
