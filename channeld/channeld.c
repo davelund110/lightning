@@ -183,6 +183,9 @@ struct peer {
 	/* Send tx_abort on every splice we accept, once it completes */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Send a corrupted shared_input_signature */
+	bool dev_splice_corrupt_shared_sig;
+
 	/* Information used for reestablishment. */
 	bool last_was_revoke;
 	struct changed_htlc *last_sent_commit;
@@ -4048,6 +4051,19 @@ static void resume_splice_negotiation(struct peer *peer,
 
 	txsig_tlvs = tlv_txsigs_tlvs_new(tmpctx);
 	txsig_tlvs->shared_input_signature = &splice_sig.s;
+	if (peer->dev_splice_corrupt_shared_sig) {
+		secp256k1_ecdsa_signature *bad
+			= tal(tmpctx, secp256k1_ecdsa_signature);
+		u8 compact[64];
+		secp256k1_ecdsa_signature_serialize_compact(secp256k1_ctx,
+							    compact,
+							    &splice_sig.s);
+		compact[31] ^= 1;
+		if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_ctx,
+							     bad, compact))
+			abort();
+		txsig_tlvs->shared_input_signature = bad;
+	}
 
 	/* DTODO: is this finalize call required? */
 	psbt_finalize(current_psbt);
@@ -4149,6 +4165,17 @@ static void resume_splice_negotiation(struct peer *peer,
 		 *   - MUST sign the transaction using SIGHASH_ALL */
 		their_sig->sighash_type = channel_type_sighash(peer->channel->type, SIGHASH_ALL);
 		their_sig->s = *their_txsigs_tlvs->shared_input_signature;
+
+		/* Otherwise a bad signature only shows when the splice tx
+		 * fails to broadcast, or not at all if the peer's copy
+		 * reached the mempool first. */
+		if (!check_tx_sig(bitcoin_tx, splice_funding_index, NULL,
+				  wit_script, their_pubkey, their_sig))
+			peer_failed_err(peer->pps, &peer->channel_id,
+					"Bad shared_input_signature %s for"
+					" splice tx %s",
+					fmt_bitcoin_signature(tmpctx, their_sig),
+					fmt_bitcoin_txid(tmpctx, &final_txid));
 
 		/* Set the commit_sig on the commitment tx psbt */
 		if (!psbt_input_set_signature(current_psbt,
@@ -7105,6 +7132,7 @@ static void init_channel(struct peer *peer)
 				    &peer->remote_upfront_shutdown_script,
 				    &channel_type,
 				    &peer->dev_disable_commit,
+				    &peer->dev_splice_corrupt_shared_sig,
 				    &pbases,
 				    &peer->splice_state->inflights,
 				    &peer->local_alias,

@@ -907,6 +907,76 @@ def test_splice_abort_after_sigs_sent(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_bad_shared_input_signature(node_factory, bitcoind):
+    """A bad shared_input_signature fails the channel when it arrives.
+
+    l2 contributes nothing, so it sends tx_signatures first, here with a
+    corrupted shared_input_signature.  Unchecked, l1 only found out when its
+    splice tx failed to broadcast.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True,
+                                            'dev-splice-corrupt-shared-sig': None}])
+
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    with pytest.raises(RpcError, match='Bad shared_input_signature'):
+        l1.rpc.splice_update(chan_id, result['psbt'])
+
+    l1.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_NORMAL')
+    assert not l1.daemon.is_in_log(r'Broadcasting splice tx')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_bad_shared_input_signature_after_ours(node_factory, bitcoind):
+    """As above, but the bad signature arrives after we sent ours.
+
+    l1 sends it this time, so l2 has already signed.  l2 fails the channel.
+    l1 holds both good signatures and broadcasts the splice, so the channel
+    closes through the commitment that spends it.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True,
+                                            'dev-splice-corrupt-shared-sig': None},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    with pytest.raises(RpcError, match='Bad shared_input_signature'):
+        l1.rpc.splice_signed(chan_id, result['signed_psbt'])
+
+    l2.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_')
+    assert not l2.daemon.is_in_log(r'Broadcasting splice tx')
+    l1.daemon.wait_for_log(r'Broadcasting splice tx')
+
+    bitcoind.generate_block(1, wait_for_mempool=2)
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['state'] == 'ONCHAIN')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.parametrize("closer", ["initiator", "accepter"])
 def test_splice_locked_then_force_close(node_factory, bitcoind, closer):
     """A force close after a locked splice must drop our current commitment.

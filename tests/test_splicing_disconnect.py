@@ -76,6 +76,46 @@ def test_splice_disconnect_sig(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_bad_shared_input_signature_reconnect(node_factory, bitcoind):
+    """A bad shared_input_signature retransmitted on reconnect is caught too."""
+    disconnect = ['-WIRE_TX_SIGNATURES']
+    if EXPERIMENTAL_DUAL_FUND:
+        disconnect = ['=WIRE_TX_SIGNATURES'] + disconnect
+
+    l1 = node_factory.get_node(disconnect=disconnect,
+                               options={'dev-no-reconnect': None,
+                                        'dev-splice-corrupt-shared-sig': None},
+                               may_reconnect=True)
+    l2 = node_factory.get_node(may_reconnect=True, allow_warning=True)
+    l1.openchannel(l2, 1000000)
+
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("107527sat", 0, 0, excess_as_change=True)
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert(result['commitments_secured'] is True)
+    result = l1.rpc.signpsbt(result['psbt'])
+    result = l1.rpc.splice_signed(chan_id, result['signed_psbt'])
+
+    l1.daemon.wait_for_log(r'dev_disconnect: \-WIRE_TX_SIGNATURES')
+    time.sleep(.2)
+    l1.daemon.kill()
+
+    del l1.daemon.opts['dev-no-reconnect']
+    del l1.daemon.opts['dev-disconnect']
+    l1.start()
+
+    l2.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+    l2.daemon.wait_for_log(r'Bad shared_input_signature')
+    l2.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_disconnect_commit(node_factory, bitcoind, executor):
     l1 = node_factory.get_node(options={'dev-no-reconnect': None},
                                may_reconnect=True)
