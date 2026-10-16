@@ -997,6 +997,35 @@ def test_splice_candidate_spent_before_lock(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_peer_aborts_after_tx_complete(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'dev-splice-abort-at-tx-complete': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+
+    # l2 sends tx_abort after tx_complete, when l1 has signed its side of
+    # the splice tx but not sent tx_signatures: that is still allowed.
+    funds_result = l1.rpc.fundpsbt("111722sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    with pytest.raises(RpcError, match='dev-splice-abort-at-tx-complete'):
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        l1.rpc.splice_update(chan_id, result['psbt'])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 0
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_reserve_changes_at_reestablish(node_factory, bitcoind):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
                                      opts={'may_reconnect': True,

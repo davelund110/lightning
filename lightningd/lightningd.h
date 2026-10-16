@@ -366,6 +366,10 @@ struct lightningd {
 	 * peer's refusal can be tested. */
 	bool dev_splice_without_unified_sigs;
 
+	/* Fail every splice we accept with tx_abort once the negotiation
+	 * completes, so the initiator's handling of it can be tested. */
+	bool dev_splice_abort_at_tx_complete;
+
 	/* Allow changing of shutdown output point even if dangerous */
 	bool dev_allow_shutdown_destination_change;
 
