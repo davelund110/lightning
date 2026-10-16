@@ -4,7 +4,6 @@
 # Extract version from git, or if we're from a zipfile, use dirname
 VERSION ?= $(shell git describe --tags --always --dirty=-modded --abbrev=7 2>/dev/null || \
 	pwd | $(SED) -n 's|.*/c\{0,1\}lightning-v\{0,1\}\([0-9a-f.rc\-]*\)$$|v\1|gp')
-$(info Building version $(VERSION))
 
 # Next release.
 CLN_NEXT_VERSION := v26.06
@@ -38,6 +37,10 @@ DEFAULT_BOLTVERSION := 311119388a46dfa859da3d2eda0ca836cfc5f078
 BOLTVERSION := $(DEFAULT_BOLTVERSION)
 
 -include config.vars
+
+# Evaluate it once, so a later git failure can't change it mid-build
+VERSION := $(VERSION)
+$(info Building version $(VERSION))
 
 # Use Homebrew LLVM toolchain for fuzzing support on macOS
 ifeq ($(OS),Darwin)
