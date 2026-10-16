@@ -877,14 +877,14 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 
 	tal_free(excluded);
 
-	/* If rest of wallet has enough funds, than no emergency sats required. */
+	/* If rest of wallet has enough funds, than no emergency sats required.
+	 * Otherwise this reduces it, so it must not be the global. */
+	emergency_sat = cmd->ld->emergency_sat;
 	if (wallet_has_funds(cmd->ld->wallet,
 			     cast_const2(const struct utxo **, utxos),
 			     get_block_height(cmd->ld->topology),
-			     &cmd->ld->emergency_sat))
+			     &emergency_sat))
 		emergency_sat = AMOUNT_SAT(0);
-	else
-		emergency_sat = cmd->ld->emergency_sat;
 
 	if (wally_psbt_get_locktime(psbt, &psbt_locktime) != WALLY_OK)
 		return command_fail(cmd, FUNDING_PSBT_INVALID,
