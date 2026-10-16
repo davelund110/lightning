@@ -1017,6 +1017,11 @@ def test_splice_coinbase_input_refused(node_factory, bitcoind):
     with pytest.raises(RpcError, match='coinbase'):
         l1.rpc.splice_init(chan_id, 100000, psbt)
 
+    # Nor in a later update.
+    l1.rpc.splice_init(chan_id, 100000)
+    with pytest.raises(RpcError, match='coinbase'):
+        l1.rpc.splice_update(chan_id, psbt)
+
     # splicein funds with addpsbtinput, which leaves coinbase outputs out.
     mature_coinbase(l3, bitcoind)
     with pytest.raises(RpcError, match='Could not afford'):

@@ -842,7 +842,7 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 				continue;
 			/* This funds splices, which can't spend a coinbase
 			 * output. */
-			if (utxo->is_in_coinbase)
+			if (!chainparams->is_elements && utxo->is_in_coinbase)
 				continue;
 
 			tal_arr_expand(&utxos, utxo);

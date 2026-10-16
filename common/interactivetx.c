@@ -577,7 +577,8 @@ char *process_interactivetx_updates(const tal_t *ctx,
 				 *     transaction:
 				 *     - MUST fail the negotiation by sending `tx_abort`.
 				 */
-				if (wally_tx_is_coinbase(tx->wtx, &is_coinbase) == WALLY_OK
+				if (!chainparams->is_elements
+				    && wally_tx_is_coinbase(tx->wtx, &is_coinbase) == WALLY_OK
 				    && is_coinbase) {
 					bitcoin_txid(tx, &outpoint.txid);
 					ictx->our_abort_reason

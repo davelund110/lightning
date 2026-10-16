@@ -2378,19 +2378,15 @@ static bool splice_psbt_adds_coinbase(const struct lightningd *ld,
 				      const struct channel *channel,
 				      const struct wally_psbt *psbt)
 {
-	if (ld->dev_splice_coinbase_input)
+	if (chainparams->is_elements || ld->dev_splice_coinbase_input)
 		return false;
 
+	/* channeld aborts when the peer adds one, so any here is ours. */
 	for (size_t i = 0; i < psbt->num_inputs; i++) {
 		const struct wally_psbt_input *in = &psbt->inputs[i];
 		struct bitcoin_outpoint outpoint;
-		u64 serial_id;
 		size_t is_coinbase;
 
-		/* The peer's inputs are theirs to check. */
-		if (psbt_get_serial_id(&in->unknowns, &serial_id)
-		    && serial_id % 2 != TX_INITIATOR)
-			continue;
 		wally_psbt_input_get_outpoint(in, &outpoint);
 		if (bitcoin_outpoint_eq(&outpoint, &channel->funding))
 			continue;
