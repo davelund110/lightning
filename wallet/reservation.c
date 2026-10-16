@@ -759,7 +759,7 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 {
 	struct utxo **utxos;
 	const struct utxo **excluded;
-	bool all;
+	bool all, skipped_p2wsh, use_p2wsh;
 	struct amount_sat *req_amount, input, emergency_sat, diff;
 	u32 current_height, *locktime, *reserve, weight, *min_feerate;
 	struct json_stream *response;
@@ -818,6 +818,11 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 	/* Either uneconomical at this feerate, or already included. */
 	excluded = tal_arr(cmd, const struct utxo *, 0);
 
+	/* Peers may refuse splice inputs other than P2WPKH or P2TR, or with
+	 * a relative lock: anchor to_remote outputs are both, so use them
+	 * last. */
+	skipped_p2wsh = use_p2wsh = false;
+
 	input = AMOUNT_SAT(0);
 	weight = 0;
 	while (!inputs_sufficient(input, *req_amount, 0, 0, &diff)) {
@@ -840,6 +845,10 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 				continue;
 			if (utxo_is_csv_locked(utxo, current_height))
 				continue;
+			if (utxo->utxotype == UTXO_P2WSH_FROM_CLOSE && !use_p2wsh) {
+				skipped_p2wsh = true;
+				continue;
+			}
 
 			tal_arr_expand(&utxos, utxo);
 
@@ -850,6 +859,16 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 
 			/* But also adds weight */
 			weight += utxo_weight;
+			continue;
+		}
+
+		if (skipped_p2wsh && !use_p2wsh) {
+			log_unusual(cmd->ld->log, "addpsbtinput: using P2WSH"
+				    " close outputs, peers may reject them");
+			use_p2wsh = true;
+			tal_resize(&excluded, 0);
+			for (size_t i = 0; i < tal_count(utxos); i++)
+				tal_arr_expand(&excluded, utxos[i]);
 			continue;
 		}
 
