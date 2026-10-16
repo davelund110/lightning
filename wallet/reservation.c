@@ -837,10 +837,6 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 
 		if (utxo) {
 			tal_arr_expand(&excluded, utxo);
-			if (utxo->utxotype == UTXO_P2WSH_FROM_CLOSE && !use_p2wsh) {
-				skipped_p2wsh = true;
-				continue;
-			}
 			utxo_weight = utxo_spend_weight(utxo, 0);
 			fee = amount_tx_fee(*min_feerate, utxo_weight);
 
@@ -849,6 +845,10 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 				continue;
 			if (utxo_is_csv_locked(utxo, current_height))
 				continue;
+			if (utxo->utxotype == UTXO_P2WSH_FROM_CLOSE && !use_p2wsh) {
+				skipped_p2wsh = true;
+				continue;
+			}
 
 			tal_arr_expand(&utxos, utxo);
 
