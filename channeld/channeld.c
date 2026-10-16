@@ -180,6 +180,9 @@ struct peer {
 	/* If set, don't fire commit counter when this hits 0 */
 	u32 *dev_disable_commit;
 
+	/* Send tx_abort on every splice we accept, once it completes */
+	bool dev_splice_abort_at_tx_complete;
+
 	/* Information used for reestablishment. */
 	bool last_was_revoke;
 	struct changed_htlc *last_sent_commit;
@@ -1962,7 +1965,17 @@ static void check_tx_abort(struct peer *peer, const u8 *msg, struct bitcoin_txid
 		struct inflight *itr = peer->splice_state->inflights[i];
 		if (!bitcoin_txid_eq(&itr->outpoint.txid, txid))
 			continue;
-		if (have_i_signed_inflight(peer, itr) || itr->i_sent_sigs) {
+		/* BOLT #2:
+		 * A sending node:
+		 *   - MUST NOT have already transmitted `tx_signatures`
+		 */
+		/* As initiator we sign the splice we are negotiating before
+		 * sending anything, so for it i_sent_sigs decides. Any other
+		 * inflight, including this one after a reconnect, may predate
+		 * that field, so our signature on it counts as sent. */
+		if (itr->i_sent_sigs
+		    || (!(peer->splicing && itr == last_inflight(peer))
+			&& have_i_signed_inflight(peer, itr))) {
 			peer_failed_err(peer->pps, &peer->channel_id, "tx_abort"
 				        " is not allowed after I have sent my"
 				        " signature. msg: %s txid: %s",
@@ -4517,6 +4530,9 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 
 	psbt_txid(tmpctx, ictx->current_psbt, &outpoint.txid, NULL);
 	check_duplicate_inflight(peer, &outpoint.txid);
+
+	if (peer->dev_splice_abort_at_tx_complete)
+		splice_abort(peer, NULL, "dev-splice-abort-at-tx-complete");
 
 	psbt_finalize(ictx->current_psbt);
 
@@ -7095,7 +7111,8 @@ static void init_channel(struct peer *peer)
 				    &peer->dev_disable_commit,
 				    &pbases,
 				    &peer->splice_state->inflights,
-				    &peer->local_alias)) {
+				    &peer->local_alias,
+				    &peer->dev_splice_abort_at_tx_complete)) {
 		master_badmsg(WIRE_CHANNELD_INIT, msg);
 	}
 
