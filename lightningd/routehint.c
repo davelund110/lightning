@@ -13,6 +13,16 @@ static bool scid_in_arr(const struct short_channel_id *scidarr,
 	return false;
 }
 
+static bool any_scid_in_arr(const struct short_channel_id *scidarr,
+			    const struct short_channel_id *scids)
+{
+	for (size_t i = 0; i < tal_count(scids); i++)
+		if (scid_in_arr(scidarr, scids[i]))
+			return true;
+
+	return false;
+}
+
 static bool is_fronting_node(const struct lightningd *ld,
 			     const struct node_id *node)
 {
@@ -118,6 +128,18 @@ routehint_candidates(const tal_t *ctx,
 			continue;
 		}
 
+		/* Gossip keeps a scid replaced by a splice or reorg for a
+		 * while, and it maps to the same channel as the current one. */
+		if (scid_in_arr(candidate.c->old_scids, r->short_channel_id)
+		    && !(candidate.c->scid
+			 && short_channel_id_eq(*candidate.c->scid,
+						r->short_channel_id))) {
+			log_debug(ld->log, "%s: replaced (splice or reorg)",
+				  fmt_short_channel_id(tmpctx,
+						       r->short_channel_id));
+			continue;
+		}
+
 		/* Check channel is in CHANNELD_NORMAL or CHANNELD_AWAITING_SPLICE */
 		if (!channel_state_can_add_htlc(candidate.c->state)) {
 			log_debug(ld->log, "%s: abnormal channel",
@@ -167,10 +189,11 @@ routehint_candidates(const tal_t *ctx,
 		/* Consider only hints they gave */
 		if (hints) {
 			log_debug(ld->log, "We have hints!");
-			/* Allow specification by alias, too */
+			/* Allow specification by alias or replaced scid, too */
 			if (!scid_in_arr(hints, r->short_channel_id)
 			    && (!candidate.c->alias[REMOTE]
-				|| !scid_in_arr(hints, *candidate.c->alias[REMOTE]))) {
+				|| !scid_in_arr(hints, *candidate.c->alias[REMOTE]))
+			    && !any_scid_in_arr(hints, candidate.c->old_scids)) {
 				log_debug(ld->log, "scid %s not in hints",
 					  fmt_short_channel_id(tmpctx,
 							       r->short_channel_id));
