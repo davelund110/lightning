@@ -3203,6 +3203,22 @@ def test_anchor_min_emergency(bitcoind, node_factory):
     wait_for(lambda: l1.rpc.listfunds()['outputs'] == [])
 
 
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd has different tx costs')
+def test_addpsbtinput_keeps_min_emergency(bitcoind, node_factory):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000)
+    bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('bech32')['bech32'], 100000 / 10**8)
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == 2)
+
+    # The rest of the wallet covers the reserve, which must not zero it.
+    l1.rpc.addpsbtinput(satoshi=1000, reserve=0)
+
+    tx = l1.rpc.withdraw(l2.rpc.newaddr('bech32')['bech32'], 'all')['tx']
+    outputs = bitcoind.rpc.decoderawtransaction(tx)['vout']
+    assert len(outputs) == 2
+    assert Millisatoshi('25000sat') in [Millisatoshi(f"{o['value'] * 10**8:.0f}sat") for o in outputs]
+
+
 def test_fundchannel_utxo_too_small(bitcoind, node_factory):
     l1, l2 = node_factory.get_nodes(2)
 
