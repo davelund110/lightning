@@ -1794,6 +1794,7 @@ bool peer_start_channeld(struct channel *channel,
 	struct channel_inflight *inflight;
 	struct inflight **inflights;
 	struct bitcoin_txid txid;
+	struct channel_config our_config, their_config;
 
 	hsmfd = hsm_get_client_fd(ld, &channel->peer->id,
 				  channel->dbid,
@@ -1954,6 +1955,18 @@ bool peer_start_channeld(struct channel *channel,
 
 	feerate_splice = splice_feerate(ld->topology, ld);
 
+	/* A splice's reserves take effect at channel_reestablish, which
+	 * a restart after tx_abort does not send. */
+	our_config = channel->our_config;
+	their_config = channel->channel_info.their_config;
+	if (reconnected)
+		channel->pre_splice_reserves
+			= tal_free(channel->pre_splice_reserves);
+	else if (channel->pre_splice_reserves) {
+		our_config.channel_reserve = channel->pre_splice_reserves[LOCAL];
+		their_config.channel_reserve = channel->pre_splice_reserves[REMOTE];
+	}
+
 	initmsg = towire_channeld_init(tmpctx,
 				       chainparams,
 				       ld->our_features,
@@ -1966,8 +1979,8 @@ bool peer_start_channeld(struct channel *channel,
 				       curr_blockheight,
 				       channel->blockheight_states,
 				       channel->lease_expiry,
-				       &channel->our_config,
-				       &channel->channel_info.their_config,
+				       &our_config,
+				       &their_config,
 				       channel->fee_states,
 				       feerate_splice,
 				       min_feerate,
