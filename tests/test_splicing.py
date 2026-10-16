@@ -442,6 +442,40 @@ def test_splice_gossip(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_invoice_routehint_after_lock(node_factory, bitcoind):
+    l1, l2, l3 = node_factory.line_graph(3, fundamount=1000000, wait_for_announce=True)
+    chan_id = l1.get_channel_id(l2)
+    pre_splice_scid = first_scid(l1, l2)
+
+    funds_result = l1.rpc.fundpsbt("111722sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.signpsbt(result['psbt'])
+    result = l1.rpc.splice_signed(chan_id, result['signed_psbt'])
+    bitcoind.generate_block(6, wait_for_mempool=result['txid'])
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels(l2.info['id'])['channels'])['state'] == 'CHANNELD_NORMAL')
+    post_splice_scid = first_scid(l1, l2)
+
+    # Gossip keeps the old scid for 72 blocks, so listincoming has both.
+    wait_for(lambda: {pre_splice_scid, post_splice_scid}
+             <= {c['short_channel_id'] for c in l1.rpc.listincoming()['incoming']})
+
+    # l2 has nothing to send l1, so the invoice falls back to MPP routehints.
+    inv = l1.rpc.invoice(100000, 'after-splice', 'after-splice')
+    routes = l1.rpc.decode(inv['bolt11'])['routes']
+    assert [r[0]['short_channel_id'] for r in routes] == [post_splice_scid]
+
+    # A hint naming the old scid still selects the channel.
+    inv = l1.rpc.invoice(100000, 'old-scid-hint', 'old-scid-hint',
+                         exposeprivatechannels=[pre_splice_scid])
+    routes = l1.rpc.decode(inv['bolt11'])['routes']
+    assert [r[0]['short_channel_id'] for r in routes] == [post_splice_scid]
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_listnodes(node_factory, bitcoind):
     # Here we do a splice but underfund it purposefully
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True)
