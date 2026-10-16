@@ -355,6 +355,11 @@ struct channel {
 	/* Do we allow the peer to set any fee it wants? */
 	bool ignore_fee_limits;
 
+	/* If a splice locked since the last channel_reestablish, the
+	 * reserves channeld keeps until the next one: [LOCAL] is our
+	 * config's, [REMOTE] theirs. */
+	struct amount_sat *pre_splice_reserves;
+
 	/* Last time we had a stable connection, if any (0 = none) */
 	u64 last_stable_connection;
 	struct oneshot *stable_conn_timer;
