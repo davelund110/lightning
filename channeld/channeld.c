@@ -4047,7 +4047,9 @@ static void resume_splice_negotiation(struct peer *peer,
 
 	psbt_txid(tmpctx, current_psbt, &final_txid, NULL);
 
-	inflight->i_sent_sigs = send_signature;
+	/* Never clear it: send_signature is false when we only receive theirs */
+	if (send_signature)
+		inflight->i_sent_sigs = true;
 	if (do_i_sign_first(peer, current_psbt, our_role,
 			    inflight->force_sign_first)
 		&& send_signature) {
