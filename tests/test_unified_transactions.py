@@ -211,8 +211,10 @@ def test_unified_htlc_timeout_after_splice(node_factory, bitcoind, executor):
     # Close on the splice's first commitment, so timing the HTLC out uses the
     # HTLC sigs promoted from the splice rather than ones from a later update.
     a.rpc.dev_fail(b.info['id'])
-    a.wait_for_channel_onchain(b.info['id'])
-    bitcoind.generate_block(1)
+    # The anchor spend takes a wallet coin the HTLC timeout tx needs too: left
+    # in the mempool, it blocks that tx, so mine it with the commitment.
+    a.daemon.wait_for_log('Creating anchor spend for local commit tx ')
+    bitcoind.generate_block(1, wait_for_mempool=2)
     a.daemon.wait_for_log(' to ONCHAIN')
 
     _, txid, blocks = a.wait_for_onchaind_tx('OUR_HTLC_TIMEOUT_TX', 'OUR_UNILATERAL/OUR_HTLC')
