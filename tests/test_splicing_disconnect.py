@@ -4,7 +4,7 @@ import unittest
 import time
 from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND
 from utils import (
-    TEST_NETWORK
+    TEST_NETWORK, wait_for
 )
 
 
@@ -42,6 +42,9 @@ def test_splice_disconnect_sig(node_factory, bitcoind):
     print("Killing l1 without sending WIRE_TX_SIGNATURES")
     l1.daemon.kill()
 
+    psbt_query = "SELECT funding_psbt FROM channel_funding_inflights;"
+    psbt = l2.db_query(psbt_query)[0]['funding_psbt']
+
     # Restart l1, without disconnect stuff.
     del l1.daemon.opts['dev-no-reconnect']
     del l1.daemon.opts['dev-disconnect']
@@ -52,6 +55,10 @@ def test_splice_disconnect_sig(node_factory, bitcoind):
     # Wait until nodes are reconnected
     l1.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
     l2.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+
+    # l2 only receives l1's signatures now, but it still sent its own.
+    wait_for(lambda: l2.db_query(psbt_query)[0]['funding_psbt'] != psbt)
+    assert l2.db_query("SELECT i_sent_sigs FROM channel_funding_inflights;")[0]['i_sent_sigs'] == 1
 
     bitcoind.generate_block(6, wait_for_mempool=1)
 

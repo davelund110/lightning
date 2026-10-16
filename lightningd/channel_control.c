@@ -1035,7 +1035,10 @@ static void handle_update_inflight(struct lightningd *ld,
 		inflight->last_sig = *last_sig;
 
 	inflight->locked_scid = tal_steal(inflight, locked_scid);
-	inflight->i_sent_sigs = i_sent_sigs;
+	if (inflight->i_sent_sigs && !i_sent_sigs)
+		log_broken(channel->log, "channeld tried to clear i_sent_sigs");
+	else
+		inflight->i_sent_sigs = i_sent_sigs;
 
 	tal_wally_start();
 	if (wally_psbt_combine(inflight->funding_psbt, psbt) != WALLY_OK) {
