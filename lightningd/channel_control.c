@@ -2368,6 +2368,40 @@ static void destroy_splice_command(struct splice_command *cc)
 	list_del(&cc->list);
 }
 
+/* BOLT-splice #2:
+ * The sending node:
+ *...
+ *   - If it follows the BLAKE2b proof of work rules:
+ *     - MUST NOT add an input spending a coinbase output.
+ */
+static bool splice_psbt_adds_coinbase(const struct lightningd *ld,
+				      const struct channel *channel,
+				      const struct wally_psbt *psbt)
+{
+	if (ld->dev_splice_coinbase_input)
+		return false;
+
+	for (size_t i = 0; i < psbt->num_inputs; i++) {
+		const struct wally_psbt_input *in = &psbt->inputs[i];
+		struct bitcoin_outpoint outpoint;
+		u64 serial_id;
+		size_t is_coinbase;
+
+		/* The peer's inputs are theirs to check. */
+		if (psbt_get_serial_id(&in->unknowns, &serial_id)
+		    && serial_id % 2 != TX_INITIATOR)
+			continue;
+		wally_psbt_input_get_outpoint(in, &outpoint);
+		if (bitcoin_outpoint_eq(&outpoint, &channel->funding))
+			continue;
+		if (in->utxo
+		    && wally_tx_is_coinbase(in->utxo, &is_coinbase) == WALLY_OK
+		    && is_coinbase)
+			return true;
+	}
+	return false;
+}
+
 static struct command_result *json_splice_init(struct command *cmd,
 					       const char *buffer,
 					       const jsmntok_t *obj UNNEEDED,
@@ -2443,6 +2477,10 @@ static struct command_result *json_splice_init(struct command *cmd,
 		return command_fail(cmd,
 				    SPLICE_INPUT_ERROR,
 				    "Splice failed to convert to v2");
+	if (splice_psbt_adds_coinbase(cmd->ld, channel, initialpsbt))
+		return command_fail(cmd,
+				    SPLICE_INPUT_ERROR,
+				    "A splice can't spend a coinbase output.");
 
 	msg = towire_channeld_splice_init(NULL, initialpsbt, *relative_amount,
 					  *feerate_per_kw, *force_feerate,
@@ -2494,6 +2532,10 @@ static struct command_result *json_splice_update(struct command *cmd,
 		return command_fail(cmd,
 				    SPLICE_INPUT_ERROR,
 				    "Splice failed to convert to v2");
+	if (splice_psbt_adds_coinbase(cmd->ld, channel, psbt))
+		return command_fail(cmd,
+				    SPLICE_INPUT_ERROR,
+				    "A splice can't spend a coinbase output.");
 
 	subd_send_msg(channel->owner,
 		      take(towire_channeld_splice_update(NULL, psbt)));

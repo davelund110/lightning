@@ -4491,6 +4491,8 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 	if (error)
 		peer_failed_err(peer->pps, &peer->channel_id,
 				"Interactive splicing error: %s", error);
+	if (ictx->our_abort_reason)
+		splice_abort(peer, NULL, "%s", ictx->our_abort_reason);
 
 	check_tx_abort(peer, abort_msg, NULL);
 
@@ -4755,6 +4757,8 @@ static void splice_initiator_user_finalized(struct peer *peer)
 	if (error)
 		peer_failed_warn(peer->pps, &peer->channel_id,
 				 "Splice interactivetx error: %s", error);
+	if (ictx->our_abort_reason)
+		splice_abort(peer, NULL, "%s", ictx->our_abort_reason);
 
 	check_tx_abort(peer, abort_msg, NULL);
 
@@ -4969,6 +4973,8 @@ static void splice_initiator_user_update(struct peer *peer, const u8 *inmsg)
 	if (error)
 		peer_failed_warn(peer->pps, &peer->channel_id,
 				"Splice update error: %s", error);
+	if (ictx->our_abort_reason)
+		splice_abort(peer, NULL, "%s", ictx->our_abort_reason);
 
 	check_tx_abort(peer, abort_msg, NULL);
 

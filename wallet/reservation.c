@@ -840,6 +840,10 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 				continue;
 			if (utxo_is_csv_locked(utxo, current_height))
 				continue;
+			/* This funds splices, which can't spend a coinbase
+			 * output. */
+			if (utxo->is_in_coinbase)
+				continue;
 
 			tal_arr_expand(&utxos, utxo);
 

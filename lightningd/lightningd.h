@@ -366,6 +366,10 @@ struct lightningd {
 	 * peer's refusal can be tested. */
 	bool dev_splice_without_unified_sigs;
 
+	/* Let a splice add a coinbase input our own check would refuse, so
+	 * the peer's refusal can be tested. */
+	bool dev_splice_coinbase_input;
+
 	/* Allow changing of shutdown output point even if dangerous */
 	bool dev_allow_shutdown_destination_change;
 

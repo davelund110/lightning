@@ -992,3 +992,58 @@ def test_splice_candidate_spent_before_lock(node_factory, bitcoind):
     chan = only_one(l1.rpc.listpeerchannels()['channels'])
     assert chan['state'] == 'ONCHAIN'
     assert chan['funding_txid'] == splice_txid
+
+
+def mature_coinbase(node, bitcoind):
+    addr = node.rpc.newaddr('bech32')['bech32']
+    coinbase = bitcoind.rpc.getblock(bitcoind.rpc.generatetoaddress(1, addr)[0])['tx'][0]
+    bitcoind.generate_block(100)
+    sync_blockheight(bitcoind, [node])
+    wait_for(lambda: [o for o in node.rpc.listfunds()['outputs'] if o['txid'] == coinbase])
+    output = only_one([o for o in node.rpc.listfunds()['outputs'] if o['txid'] == coinbase])
+    return f"{coinbase}:{output['output']}"
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_coinbase_input_refused(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True)
+    l3 = node_factory.get_node()
+    chan_id = l1.get_channel_id(l2)
+
+    outpoint = mature_coinbase(l1, bitcoind)
+    psbt = l1.rpc.utxopsbt("111722sat", 0, 0, [outpoint], excess_as_change=True)['psbt']
+    with pytest.raises(RpcError, match='coinbase'):
+        l1.rpc.splice_init(chan_id, 100000, psbt)
+
+    # splicein funds with addpsbtinput, which leaves coinbase outputs out.
+    mature_coinbase(l3, bitcoind)
+    with pytest.raises(RpcError, match='Could not afford'):
+        l3.rpc.addpsbtinput(100000)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_peer_coinbase_input_aborted(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-splice-coinbase-input': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+
+    outpoint = mature_coinbase(l1, bitcoind)
+    psbt = l1.rpc.utxopsbt("111722sat", 0, 0, [outpoint], excess_as_change=True)['psbt']
+    result = l1.rpc.splice_init(chan_id, 100000, psbt)
+    with pytest.raises(RpcError, match='coinbase'):
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        l1.rpc.splice_update(chan_id, result['psbt'])
+    l2.daemon.wait_for_log(r'We are initiating tx_abort for reason: .*coinbase')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
