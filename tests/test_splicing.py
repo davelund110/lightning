@@ -476,6 +476,39 @@ def test_splice_listnodes(node_factory, bitcoind):
     wait_for(lambda: len(l2.rpc.listnodes()['nodes']) == 2)
 
 
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_inputs_prefer_p2wpkh_p2tr(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True}])
+
+    # l2's force close leaves l1 a P2WSH to_remote output.
+    l1.stop()
+    l2.rpc.close(l1.info['id'], unilateraltimeout=1)
+    l2.wait_for_channel_onchain(l1.info['id'])
+    bitcoind.generate_block(100)
+    l1.start()
+    l1.daemon.wait_for_log('onchaind complete, forgetting peer')
+    wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == 2)
+    outputs = l1.rpc.listfunds()['outputs']
+    p2wsh = only_one([o for o in outputs if o['scriptpubkey'].startswith('0020')])
+    others = sum(o['amount_msat'] for o in outputs if o is not p2wsh) // 1000
+
+    def selected(amount):
+        res = l1.rpc.addpsbtinput(satoshi=amount, reserve=0)['reservations']
+        return [(r['txid'], r['vout']) for r in res]
+
+    for _ in range(20):
+        assert (p2wsh['txid'], p2wsh['output']) not in selected(100000)
+
+    assert not l1.daemon.is_in_log('addpsbtinput: using P2WSH close outputs')
+
+    # It is still used when the others are not enough.
+    assert (p2wsh['txid'], p2wsh['output']) in selected(others + 10000)
+    l1.daemon.wait_for_log('addpsbtinput: using P2WSH close outputs')
+
+
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
