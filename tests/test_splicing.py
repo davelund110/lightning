@@ -1051,3 +1051,14 @@ def test_splice_reserve_changes_at_reestablish(node_factory, bitcoind):
     l2.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
     with pytest.raises(RpcError, match=r'Capacity exceeded'):
         l2_pays_l1(1000000)
+
+    # And stay after a later tx_abort.
+    result = l1.rpc.splice_init(chan_id, 100000)
+    with pytest.raises(RpcError):
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        l1.rpc.splice_update(chan_id, result['psbt'])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['peer_connected'])
+    with pytest.raises(RpcError, match=r'Capacity exceeded'):
+        l2_pays_l1(1000000)
