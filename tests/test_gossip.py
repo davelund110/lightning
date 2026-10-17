@@ -2205,7 +2205,10 @@ def test_gossip_throttle(node_factory, bitcoind, chainparams):
                           check=True,
                           timeout=TIMEOUT, stdout=subprocess.PIPE).stdout.split()
     time_slow = time.time() - start_slow
-    assert time_slow > 3
+    # A throttle waits at least a second; how many it takes depends on
+    # message sizes and the random flush delay, so check the log for it.
+    assert time_slow > 1
+    l4.daemon.wait_for_log('Throttling outgoing peer .*: too much traffic')
 
     # Contents should be identical (once uniquified, since each
     # doubles-up on its own gossip)
@@ -2257,7 +2260,8 @@ def test_gossip_throttle(node_factory, bitcoind, chainparams):
                           check=True,
                           timeout=TIMEOUT, stdout=subprocess.PIPE).stdout.split()
     time_slow = time.time() - start_slow
-    assert time_slow > 3
+    assert time_slow > 1
+    l4.daemon.wait_for_log('Throttling outgoing peer .*: too much traffic')
     assert set(out2) == set(out4)
 
 
