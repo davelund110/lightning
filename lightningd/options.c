@@ -909,6 +909,10 @@ static void dev_register_opts(struct lightningd *ld)
 		     opt_set_bool,
 		     &ld->dev_splice_without_unified_sigs,
 		     "Start a splice of a channel without option_unified_sigs");
+	clnopt_noarg("--dev-splice-coinbase-input", OPT_DEV,
+		     opt_set_bool,
+		     &ld->dev_splice_coinbase_input,
+		     "Let a splice add an input spending a coinbase output");
 	clnopt_noarg("--dev-splice-abort-at-tx-complete", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_splice_abort_at_tx_complete,

@@ -845,6 +845,10 @@ static struct command_result *json_addpsbtinput(struct command *cmd,
 				continue;
 			if (utxo_is_csv_locked(utxo, current_height))
 				continue;
+			/* This funds splices, which can't spend a coinbase
+			 * output. */
+			if (!chainparams->is_elements && utxo->is_in_coinbase)
+				continue;
 			if (utxo->utxotype == UTXO_P2WSH_FROM_CLOSE && !use_p2wsh) {
 				skipped_p2wsh = true;
 				continue;
