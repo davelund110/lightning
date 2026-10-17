@@ -14,7 +14,8 @@ from pyln.client import NodeVersion
 from pyln.client import Plugin
 from pyln.client.plugin import PluginLogHandler
 
-import ephemeral_port_reserve  # type: ignore
+import tempfile
+import errno
 import json
 import logging
 import lzma
@@ -29,7 +30,6 @@ import sqlite3
 import string
 import struct
 import subprocess
-import tempfile
 import sys
 import threading
 import time
@@ -173,25 +173,152 @@ def get_tx_p2wsh_outnum(bitcoind, tx, amount):
     return None
 
 
-unused_port_lock = threading.Lock()
-unused_port_set = set()
+_PORT_LOCK_DIR = Path(tempfile.gettempdir()) / "pyln-testing-ports"
+_PORT_LOCK_DIR.mkdir(exist_ok=True)
+
+# If we never hand out this many ports, something is wrong with our
+# ephemeral-range detection, and allocating from the OS range is a risky
+# fallback we'd rather fail loudly about.
+_MIN_RESERVED_PORTS = 2048
+
+
+def ephemeral_port_range():
+    """Return the (lo, hi) of the OS ephemeral source-port range, or None.
+
+    The kernel only ever assigns *source* ports from this range, so a listen
+    socket bound to a port *outside* it can never collide with an active
+    OS-assigned connection.  Linux/BSD expose it via /proc; macOS via sysctl.
+    """
+    try:
+        with open('/proc/sys/net/ipv4/ip_local_port_range') as f:
+            lo, hi = (int(x) for x in f.read().split())
+            return lo, hi
+    except OSError:
+        pass
+    try:
+        import subprocess
+        lo = int(subprocess.check_output(
+            ['sysctl', '-n', 'net.inet.ip.portrange.first']).strip())
+        hi = int(subprocess.check_output(
+            ['sysctl', '-n', 'net.inet.ip.portrange.last']).strip())
+        return lo, hi
+    except Exception:
+        # Unknown platform: assume the Linux default.
+        return None
+
+
+def _reserved_port_pool():
+    """Return (lo, hi) of the port range we may bind.
+
+    We prefer the region strictly below the OS ephemeral floor (which is never
+    used for source ports, so a test's listen port cannot be stolen by a
+    *binding* foreign process either, except a deliberate one).  If a machine
+    runs with a very low ephemeral floor we fall back to above the ceiling,
+    and finally to the ephemeral range itself as a best effort.
+    """
+    rng = ephemeral_port_range()
+    if rng is None:
+        lo, hi = 32768, 60999
+    else:
+        lo, hi = rng
+
+    if lo > 1024 and lo - 1024 >= _MIN_RESERVED_PORTS:
+        return 1024, lo - 1
+    if hi < 65535 and 65535 - hi >= _MIN_RESERVED_PORTS:
+        return hi + 1, 65535
+    # No room anywhere else: e.g. an ephemeral range covering everything.
+    return lo, hi
+
+
+def _port_is_free(port):
+    """Return True if 127.0.0.1:port can be bound right now.
+
+    This is an actual bind() test (like the old ephemeral_port_reserve), so we
+    never hand out a port that is genuinely claimed *right now*, as opposed to
+    merely reserved via lockfile.  We use SO_REUSEADDR to match the daemons, so
+    a lingering TIME_WAIT socket doesn't count as "in use".
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(('127.0.0.1', port))
+        return True
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        return False
+    finally:
+        s.close()
 
 
 def reserve_unused_port():
-    """Get an unused port: avoids handing out the same port unless it's been
-    returned"""
-    with unused_port_lock:
-        while True:
-            port = ephemeral_port_reserve.reserve()
-            if port not in unused_port_set:
-                break
-        unused_port_set.add(port)
+    """Get an unused port from the non-ephemeral pool.
 
-    return port
+    We test-bind the candidate so a port claimed by anything at all right now
+    is skipped, then take the filesystem lock so our *own* workers never pick
+    the same genuinely free port concurrently.  Note the lockfile only
+    coordinates our own allocations: the real protection against the OS
+    stealing a port via source-port assignment is that the pool lies outside
+    the ephemeral source-port range.
+    """
+    pool_lo, pool_hi = _reserved_port_pool()
+    while True:
+        port = random.randint(pool_lo, pool_hi)
+        if not _port_is_free(port):
+            continue
+
+        lock_path = _PORT_LOCK_DIR / f"{port}.lock"
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return port
+        except FileExistsError:
+            continue
 
 
 def drop_unused_port(port):
-    unused_port_set.remove(port)
+    if port:
+        lock_path = _PORT_LOCK_DIR / f"{port}.lock"
+        lock_path.unlink(missing_ok=True)
+
+
+def cleanup_stale_port_locks():
+    """Remove lockfiles whose owning process no longer exists."""
+    try:
+        for lock_path in _PORT_LOCK_DIR.glob("*.lock"):
+            try:
+                pid = int(lock_path.read_text())
+                try:
+                    os.kill(pid, 0)  # signal 0 = existence check, no actual signal
+                except ProcessLookupError:
+                    lock_path.unlink(missing_ok=True)
+            except (ValueError, PermissionError, FileNotFoundError):
+                pass
+    except Exception:
+        pass  # best-effort, never crash the test run over cleanup
+
+
+def wait_for_port_released(port, timeout=TIMEOUT):
+    """Wait until 127.0.0.1:port can be bound again.
+
+    A stopped node's connectd holds the listen socket until it exits,
+    which can be several seconds after lightningd itself is gone
+    (subdaemons are separate processes, and die slowly under valgrind).
+    Restarting the node before the port is released makes the new
+    connectd fail with 'Address already in use'.
+    """
+    start_time = time.time()
+    while not _port_is_free(port):
+        if time.time() - start_time > timeout:
+            raise TimeoutError(
+                "Port {} was not released within {} seconds"
+                .format(port, timeout))
+        time.sleep(0.1)
+
+    waited = time.time() - start_time
+    if waited >= 1:
+        logging.info("Port %d took %.1fs to be released", port, waited)
 
 
 class TailableProc(object):
@@ -292,6 +419,8 @@ class TailableProc(object):
 
     def cleanup_files(self):
         """Ensure files are closed."""
+        cleanup_stale_port_locks()
+
         for f in ["stdout_write", "stderr_write", "stdout_read", "stderr_read"]:
             try:
                 getattr(self, f).close()
@@ -461,10 +590,7 @@ class BitcoinD(TailableProc):
         TailableProc.__init__(self, bitcoin_dir, verbose=False)
 
         if rpcport is None:
-            self.reserved_rpcport = reserve_unused_port()
-            rpcport = self.reserved_rpcport
-        else:
-            self.reserved_rpcport = None
+            rpcport = reserve_unused_port()
 
         self.bitcoin_dir = bitcoin_dir
         self.rpcport = rpcport
@@ -505,9 +631,22 @@ class BitcoinD(TailableProc):
         self.rpc = SimpleBitcoinProxy(btc_conf_file=self.conf_file)
         self.proxies = []
 
-    def __del__(self):
-        if self.reserved_rpcport is not None:
-            drop_unused_port(self.reserved_rpcport)
+    def kill(self):
+        # Never started: parametrize('bitcoind', [False], indirect=True).
+        if self.proc is None:
+            self.cleanup_files()
+            return
+
+        try:
+            self.stop()
+        except Exception:
+            self.proc.kill()
+        self.proc.wait()
+
+        self.cleanup_files()
+        drop_unused_port(self.rpcport)
+        for p in self.proxies:
+            drop_unused_port(p.rpcport)
 
     def blake2b_activation_args(self):
         """The argument which activates this chain's rules, if any.
@@ -550,7 +689,7 @@ class BitcoinD(TailableProc):
         return TailableProc.stop(self)
 
     def get_proxy(self):
-        proxy = BitcoinRpcProxy(self)
+        proxy = BitcoinRpcProxy(self, rpcport=reserve_unused_port())
         self.proxies.append(proxy)
         proxy.start()
         return proxy
@@ -840,6 +979,9 @@ class LightningD(TailableProc):
 
     def start(self, stdin=None, wait_for_initialized=True, stderr_redir=False):
         self.opts['bitcoin-rpcport'] = self.rpcproxy.rpcport
+        # On restart, the previous incarnation's connectd may still be
+        # dying and holding our listen port: don't launch until it's free.
+        wait_for_port_released(self.port)
         TailableProc.start(self, stdin, stdout_redir=False, stderr_redir=stderr_redir)
         if wait_for_initialized:
             self.wait_for_log("Server started with public key")

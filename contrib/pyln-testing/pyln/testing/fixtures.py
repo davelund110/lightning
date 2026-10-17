@@ -193,17 +193,7 @@ def bitcoind(request, directory, teardown_checks):
 
     yield bitcoind
 
-    try:
-        bitcoind.stop()
-    except Exception:
-        if bitcoind.proc is not None:
-            bitcoind.proc.kill()
-    # A test that took the fixture unstarted, or skipped before starting it,
-    # has nothing to reap here.
-    if bitcoind.proc is not None:
-        bitcoind.proc.wait()
-
-    bitcoind.cleanup_files()
+    bitcoind.kill()
 
 
 class TeardownErrors(object):
