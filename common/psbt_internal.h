@@ -35,4 +35,16 @@ psbt_to_witnesses(const tal_t *ctx,
 		  enum tx_role side_to_stack,
                   int input_index_to_ignore);
 
+/* psbt_input_witness_invalid - Check a peer's witness for its input
+ *
+ * Returns NULL if the final witness of input @i is a valid spend of a
+ * P2WPKH output, a P2TR output by its key path, or a P2WSH output which
+ * is a 2-of-2 funding output or an anchor channel's to_remote, signed
+ * with a hash type the BOLTs allow (0x21 only if @unified), otherwise
+ * why not.
+ */
+const char *psbt_input_witness_invalid(const tal_t *ctx,
+				       struct wally_psbt *psbt, size_t i,
+				       bool unified);
+
 #endif /* LIGHTNING_COMMON_PSBT_INTERNAL_H */
