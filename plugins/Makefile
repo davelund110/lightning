@@ -274,7 +274,7 @@ CLN_CURRENCYRATE_PLUGIN_SRC = $(shell find plugins/currencyrate-plugin/src -name
 
 $(RUST_TARGET_DIR)/examples/cln-plugin-startup: ${CLN_RPC_SOURCES} ${CLN_PLUGIN_SRC} plugins/examples/cln-plugin-startup.rs
 	$(CARGO) build ${CARGO_OPTS} --example cln-plugin-startup
-$(RUST_TARGET_DIR)/examples/cln-plugin-reentrant: ${CLN_PLUGIN_SRC} plugins/examples/cln-plugin-reentrant.rs
+$(RUST_TARGET_DIR)/examples/cln-plugin-reentrant: ${CLN_RPC_SOURCES} ${CLN_PLUGIN_SRC} plugins/examples/cln-plugin-reentrant.rs
 	$(CARGO) build ${CARGO_OPTS} --example cln-plugin-reentrant
 $(RUST_TARGET_DIR)/examples/cln-subscribe-wildcard: ${CLN_RPC_SOURCES} ${CLN_PLUGIN_SRC} plugins/examples/cln-subscribe-wildcard.rs
 	$(CARGO) build ${CARGO_OPTS} --example cln-subscribe-wildcard
