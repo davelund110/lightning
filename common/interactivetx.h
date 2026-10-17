@@ -64,6 +64,11 @@ struct interactivetx_context {
 
 	/* Internal cached change set */
 	struct psbt_changeset *change_set;
+
+	/* Set when the peer's message means we must fail the negotiation
+	 * with `tx_abort`: process_interactivetx_updates returns, and the
+	 * caller sends it. */
+	char *our_abort_reason;
 };
 
 /* Builds a new default interactivetx context with default values */

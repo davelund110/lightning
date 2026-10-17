@@ -2030,6 +2030,7 @@ bool peer_start_channeld(struct channel *channel,
 				       ld->dev_disable_commit == -1
 					     ? NULL
 					     : (u32 *)&ld->dev_disable_commit,
+				       ld->dev_splice_corrupt_shared_sig,
 				       pbases,
 				       cast_const2(const struct inflight **,
 						   inflights),
@@ -2385,6 +2386,36 @@ static void destroy_splice_command(struct splice_command *cc)
 	list_del(&cc->list);
 }
 
+/* BOLT-splice #2:
+ * The sending node:
+ *...
+ *   - If it follows the BLAKE2b proof of work rules:
+ *     - MUST NOT add an input spending a coinbase output.
+ */
+static bool splice_psbt_adds_coinbase(const struct lightningd *ld,
+				      const struct channel *channel,
+				      const struct wally_psbt *psbt)
+{
+	if (chainparams->is_elements || ld->dev_splice_coinbase_input)
+		return false;
+
+	/* channeld aborts when the peer adds one, so any here is ours. */
+	for (size_t i = 0; i < psbt->num_inputs; i++) {
+		const struct wally_psbt_input *in = &psbt->inputs[i];
+		struct bitcoin_outpoint outpoint;
+		size_t is_coinbase;
+
+		wally_psbt_input_get_outpoint(in, &outpoint);
+		if (bitcoin_outpoint_eq(&outpoint, &channel->funding))
+			continue;
+		if (in->utxo
+		    && wally_tx_is_coinbase(in->utxo, &is_coinbase) == WALLY_OK
+		    && is_coinbase)
+			return true;
+	}
+	return false;
+}
+
 static struct command_result *json_splice_init(struct command *cmd,
 					       const char *buffer,
 					       const jsmntok_t *obj UNNEEDED,
@@ -2460,6 +2491,10 @@ static struct command_result *json_splice_init(struct command *cmd,
 		return command_fail(cmd,
 				    SPLICE_INPUT_ERROR,
 				    "Splice failed to convert to v2");
+	if (splice_psbt_adds_coinbase(cmd->ld, channel, initialpsbt))
+		return command_fail(cmd,
+				    SPLICE_INPUT_ERROR,
+				    "A splice can't spend a coinbase output.");
 
 	msg = towire_channeld_splice_init(NULL, initialpsbt, *relative_amount,
 					  *feerate_per_kw, *force_feerate,
@@ -2511,6 +2546,10 @@ static struct command_result *json_splice_update(struct command *cmd,
 		return command_fail(cmd,
 				    SPLICE_INPUT_ERROR,
 				    "Splice failed to convert to v2");
+	if (splice_psbt_adds_coinbase(cmd->ld, channel, psbt))
+		return command_fail(cmd,
+				    SPLICE_INPUT_ERROR,
+				    "A splice can't spend a coinbase output.");
 
 	subd_send_msg(channel->owner,
 		      take(towire_channeld_splice_update(NULL, psbt)));

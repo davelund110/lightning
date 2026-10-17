@@ -61,6 +61,7 @@ struct interactivetx_context *new_interactivetx_context(const tal_t *ctx,
 	ictx->funding_tx = NULL;
 	ictx->tx_add_input_count = 0;
 	ictx->tx_add_output_count = 0;
+	ictx->our_abort_reason = NULL;
 	ictx->next_update_fn = default_next_update;
 	ictx->current_psbt = create_psbt(ictx, 0, 0, 0);
 	ictx->desired_psbt = NULL;
@@ -495,6 +496,7 @@ char *process_interactivetx_updates(const tal_t *ctx,
 			struct bitcoin_tx *tx;
 			struct bitcoin_outpoint outpoint;
 			struct tlv_tx_add_input_tlvs *tlvs;
+			size_t is_coinbase;
 
 			if (!fromwire_tx_add_input(ctx, msg, &cid,
 						   &serial_id,
@@ -567,6 +569,27 @@ char *process_interactivetx_updates(const tal_t *ctx,
 				if (!tx || len != 0)
 					return tal_fmt(ctx, "Invalid tx sent. len: %d",
 						       (int)len);
+
+				/* BOLT-splice #2:
+				 * The receiving node:
+				 *...
+				 *   - If it follows the BLAKE2b proof of work rules and `prevtx` is a coinbase
+				 *     transaction:
+				 *     - MUST fail the negotiation by sending `tx_abort`.
+				 */
+				if (!chainparams->is_elements
+				    && wally_tx_is_coinbase(tx->wtx, &is_coinbase) == WALLY_OK
+				    && is_coinbase) {
+					bitcoin_txid(tx, &outpoint.txid);
+					ictx->our_abort_reason
+						= tal_fmt(ictx,
+							  "Peer added an input"
+							  " spending coinbase"
+							  " output %s",
+							  fmt_bitcoin_outpoint(tmpctx,
+									       &outpoint));
+					return NULL;
+				}
 			}
 
 			if (outpoint.n >= tx->wtx->num_outputs)

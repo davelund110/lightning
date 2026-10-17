@@ -909,10 +909,18 @@ static void dev_register_opts(struct lightningd *ld)
 		     opt_set_bool,
 		     &ld->dev_splice_without_unified_sigs,
 		     "Start a splice of a channel without option_unified_sigs");
+	clnopt_noarg("--dev-splice-coinbase-input", OPT_DEV,
+		     opt_set_bool,
+		     &ld->dev_splice_coinbase_input,
+		     "Let a splice add an input spending a coinbase output");
 	clnopt_noarg("--dev-splice-abort-at-tx-complete", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_splice_abort_at_tx_complete,
 		     "Send tx_abort on every splice we accept, once it completes");
+	clnopt_noarg("--dev-splice-corrupt-shared-sig", OPT_DEV,
+		     opt_set_bool,
+		     &ld->dev_splice_corrupt_shared_sig,
+		     "Send a corrupted shared_input_signature in splice tx_signatures");
 	clnopt_noarg("--dev-allow-shutdown-destination-change", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_allow_shutdown_destination_change,

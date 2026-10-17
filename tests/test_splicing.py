@@ -907,6 +907,87 @@ def test_splice_abort_after_sigs_sent(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_bad_shared_input_signature(node_factory, bitcoind):
+    """A bad shared_input_signature fails the channel when it arrives.
+
+    l2 contributes nothing, so it sends tx_signatures first, here with a
+    corrupted shared_input_signature.  Unchecked, l1 only found out when its
+    splice tx failed to broadcast.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True,
+                                            'dev-splice-corrupt-shared-sig': None}])
+
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    with pytest.raises(RpcError, match='Bad shared_input_signature'):
+        l1.rpc.splice_update(chan_id, result['psbt'])
+
+    l1.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_NORMAL')
+    assert not l1.daemon.is_in_log(r'Broadcasting splice tx')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_bad_shared_input_signature_after_ours(node_factory, bitcoind):
+    """As above, but the bad signature arrives after we sent ours.
+
+    l1 sends it this time, so l2 has already signed.  l2 fails the channel.
+    l1 holds both good signatures and broadcasts the splice, so the channel
+    closes through the commitment that spends it.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True,
+                                            'dev-splice-corrupt-shared-sig': None},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    # l2's error and l1's broadcast race back to the command.
+    try:
+        l1.rpc.splice_signed(chan_id, result['signed_psbt'])
+    except RpcError:
+        pass
+
+    l2.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_.*Bad shared_input_signature')
+    assert not l2.daemon.is_in_log(r'Broadcasting splice tx')
+    line = l1.daemon.wait_for_log(r'Broadcasting splice tx')
+    splice_txid = bitcoind.rpc.decoderawtransaction(line.split('Broadcasting splice tx ')[1].split()[0])['txid']
+
+    # The splice and the commitments on the old funding output conflict, so
+    # the one which reached the mempool first confirms.  After the splice, a
+    # commitment spending it follows.
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    block = bitcoind.rpc.getblock(bitcoind.rpc.getbestblockhash(), 2)
+    if (splice_txid in [tx['txid'] for tx in block['tx']]
+            and not any(i.get('txid') == splice_txid for tx in block['tx'] for i in tx['vin'])):
+        bitcoind.generate_block(1, wait_for_mempool=1)
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['state'] == 'ONCHAIN')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.parametrize("closer", ["initiator", "accepter"])
 def test_splice_locked_then_force_close(node_factory, bitcoind, closer):
     """A force close after a locked splice must drop our current commitment.
@@ -1158,3 +1239,63 @@ def test_splice_reserve_changes_at_reestablish(node_factory, bitcoind):
     wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['peer_connected'])
     with pytest.raises(RpcError, match=r'Capacity exceeded'):
         l2_pays_l1(1000000)
+
+
+def mature_coinbase(node, bitcoind):
+    addr = node.rpc.newaddr('bech32')['bech32']
+    coinbase = bitcoind.rpc.getblock(bitcoind.rpc.generatetoaddress(1, addr)[0])['tx'][0]
+    bitcoind.generate_block(100)
+    sync_blockheight(bitcoind, [node])
+    wait_for(lambda: [o for o in node.rpc.listfunds()['outputs'] if o['txid'] == coinbase])
+    output = only_one([o for o in node.rpc.listfunds()['outputs'] if o['txid'] == coinbase])
+    return f"{coinbase}:{output['output']}"
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_coinbase_input_refused(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True)
+    l3 = node_factory.get_node()
+    chan_id = l1.get_channel_id(l2)
+
+    outpoint = mature_coinbase(l1, bitcoind)
+    psbt = l1.rpc.utxopsbt("111722sat", 0, 0, [outpoint], excess_as_change=True)['psbt']
+    with pytest.raises(RpcError, match='coinbase'):
+        l1.rpc.splice_init(chan_id, 100000, psbt)
+
+    # Nor in a later update.
+    l1.rpc.splice_init(chan_id, 100000)
+    with pytest.raises(RpcError, match='coinbase'):
+        l1.rpc.splice_update(chan_id, psbt)
+
+    # splicein funds with addpsbtinput, which leaves coinbase outputs out.
+    mature_coinbase(l3, bitcoind)
+    with pytest.raises(RpcError, match='Could not afford'):
+        l3.rpc.addpsbtinput(100000)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_peer_coinbase_input_aborted(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-splice-coinbase-input': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+
+    outpoint = mature_coinbase(l1, bitcoind)
+    psbt = l1.rpc.utxopsbt("111722sat", 0, 0, [outpoint], excess_as_change=True)['psbt']
+    result = l1.rpc.splice_init(chan_id, 100000, psbt)
+    with pytest.raises(RpcError, match='coinbase'):
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        l1.rpc.splice_update(chan_id, result['psbt'])
+    l2.daemon.wait_for_log(r'We are initiating tx_abort for reason: .*coinbase')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel')
+
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
