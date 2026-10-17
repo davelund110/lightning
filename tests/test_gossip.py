@@ -2344,9 +2344,12 @@ def test_gossip_throttle_no_unrequested_stream(node_factory, chainparams):
     chans = [GenChannel(i, i + 1) for i in range(300)]
     gsfile, nodemap = generate_gossip_store(chans)
 
+    # The huge CPU budget leaves only --dev-throttle-gossip's traffic
+    # limit, so the throttle is always the traffic one.
     l1 = node_factory.get_node(options={'disable-plugin': ['recover', 'cln-askrene', 'cln-renepay',
                                                            'bookkeeper', 'topology', 'cln-xpay'],
-                                        'dev-throttle-gossip': None},
+                                        'dev-throttle-gossip': None,
+                                        'dev-gossip-cpu-budget': 1000000000},
                                gossip_store_file=gsfile.name,
                                broken_log='Throttling (incoming|outgoing) peer')
 
