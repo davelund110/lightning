@@ -2371,7 +2371,6 @@ def test_gossip_throttle_no_unrequested_stream(node_factory, chainparams):
     assert gossipwith.communicate()[0] == b''
 
 
-@pytest.mark.xfail(strict=True)
 def test_gossip_cpu_throttle_only_queries(node_factory):
     """Only answering gossip queries counts against the CPU budget: a
     peer sending us ordinary messages (here pings) must not get its reads
