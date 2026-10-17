@@ -3932,10 +3932,10 @@ static size_t count_inputs_with_exclusions(struct wally_psbt *psbt,
 	return result;
 }
 
-/* Called to finish an ongoing splice OR on restart from channel_reestablish. */
 /* Otherwise a bad witness on one of their inputs leaves the splice
  * unbroadcastable for us while they hold a valid copy.  Checked as their
- * tx_signatures arrive, before any of ours go out and before we keep them. */
+ * tx_signatures arrive, before any of ours go out and before theirs are
+ * saved. */
 static void check_their_witnesses(struct peer *peer,
 				  const struct wally_psbt *psbt,
 				  struct witness **inws,
@@ -3956,14 +3956,6 @@ static void check_their_witnesses(struct peer *peer,
 		struct wally_psbt_input *in = &checked->inputs[i];
 		u64 in_serial;
 
-		if (i == splice_funding_index
-		    || !psbt_get_serial_id(&in->unknowns, &in_serial)
-		    || in_serial % 2 == our_role)
-			continue;
-		if (j == tal_count(inws))
-			peer_failed_warn(peer->pps, &peer->channel_id,
-					 "No witness for splice input %zu", i);
-		psbt_finalize_input(checked, in, inws[j++]);
 		/* Each digest then reads the spent output here, rather than
 		 * hashing the whole prevtx again for every input. */
 		if (in->utxo && in->index < in->utxo->num_outputs) {
@@ -3975,6 +3967,14 @@ static void check_their_witnesses(struct peer *peer,
 							    out->script_len, 0),
 						amount_sat(out->satoshi));
 		}
+		if (i == splice_funding_index
+		    || !psbt_get_serial_id(&in->unknowns, &in_serial)
+		    || in_serial % 2 == our_role)
+			continue;
+		if (j == tal_count(inws))
+			peer_failed_warn(peer->pps, &peer->channel_id,
+					 "No witness for splice input %zu", i);
+		psbt_finalize_input(checked, in, inws[j++]);
 	}
 	if (j != tal_count(inws))
 		peer_failed_warn(peer->pps, &peer->channel_id,
@@ -4006,6 +4006,7 @@ static void check_their_witnesses(struct peer *peer,
 	}
 }
 
+/* Called to finish an ongoing splice OR on restart from channel_reestablish. */
 static void resume_splice_negotiation(struct peer *peer,
 				      bool send_commitments,
 				      bool recv_commitments,
