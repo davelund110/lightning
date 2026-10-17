@@ -374,6 +374,10 @@ struct lightningd {
 	 * completes, so the initiator's handling of it can be tested. */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Send a corrupted shared_input_signature, so the peer's check can
+	 * be tested. */
+	bool dev_splice_corrupt_shared_sig;
+
 	/* Allow changing of shutdown output point even if dangerous */
 	bool dev_allow_shutdown_destination_change;
 

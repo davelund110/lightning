@@ -2030,6 +2030,7 @@ bool peer_start_channeld(struct channel *channel,
 				       ld->dev_disable_commit == -1
 					     ? NULL
 					     : (u32 *)&ld->dev_disable_commit,
+				       ld->dev_splice_corrupt_shared_sig,
 				       pbases,
 				       cast_const2(const struct inflight **,
 						   inflights),
