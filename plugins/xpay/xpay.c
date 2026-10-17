@@ -2143,19 +2143,18 @@ static struct command_result *populate_private_layer(struct command *cmd,
 	return batch_done(aux_cmd, batch);
 }
 
+static struct command_result *age_layer(struct command *cmd, struct payment *payment);
+
 static struct command_result *
-preapproveinvoice_succeed(struct command *cmd,
-			  const char *method,
-			  const char *buf,
-			  const jsmntok_t *result,
-			  struct payment *payment)
+preapprove_succeed(struct command *cmd, const char *method, const char *buf,
+		   const jsmntok_t *result, struct payment *payment)
 {
 	/* Now we can conclude `check` command */
 	if (command_check_only(cmd)) {
 		return command_check_done(cmd);
 	}
 
-	return populate_private_layer(cmd, payment);
+	return age_layer(cmd, payment);
 }
 
 /* If it returns NULL, *authorized is the most we agreed to pay. */
@@ -2879,12 +2878,12 @@ static struct command_result *xpay_core(struct command *cmd,
 	/* Now preapprove, then start payment. */
 	if (command_check_only(cmd)) {
 		req = jsonrpc_request_start(cmd, "check",
-					    &preapproveinvoice_succeed,
+					    &preapprove_succeed,
 					    &forward_error, payment);
 		json_add_string(req->js, "command_to_check", "preapproveinvoice");
 	} else {
 		req = jsonrpc_request_start(cmd, "preapproveinvoice",
-					    &preapproveinvoice_succeed,
+					    &preapprove_succeed,
 					    &forward_error, payment);
 	}
 	json_add_string(req->js, "bolt11", payment->invstring);
@@ -3041,38 +3040,33 @@ static struct command_result *getinfo_done(struct command *aux_cmd,
 	return aux_command_done(aux_cmd);
 }
 
-/* Recursion */
-static void start_aging_timer(struct plugin *plugin);
+static struct command_result *populate_private_layer(struct command *cmd,
+						     struct payment *payment);
 
-static struct command_result *age_done(struct command *timer_cmd,
-				       const char *method,
-				       const char *buf,
-				       const jsmntok_t *result,
-				       void *unused)
+static struct command_result *age_done(struct command *cmd,
+				       const char *method UNUSED,
+				       const char *buf UNUSED,
+				       const jsmntok_t *result UNUSED,
+				       struct payment *payment)
 {
-	start_aging_timer(timer_cmd->plugin);
-	return timer_complete(timer_cmd);
+	return populate_private_layer(cmd, payment);
 }
 
-static struct command_result *age_layer(struct command *timer_cmd, void *unused)
+static struct command_result *age_layer(struct command *cmd, struct payment *payment)
 {
+	struct xpay *xpay = xpay_of(cmd->plugin);
+
+	if (xpay->dev_no_age)
+		return populate_private_layer(cmd, payment);
+
 	struct out_req *req;
-	req = jsonrpc_request_start(timer_cmd, "askrene-age",
+	req = jsonrpc_request_start(cmd, "askrene-age",
 				    age_done,
 				    plugin_broken_cb,
-				    NULL);
+				    payment);
 	json_add_string(req->js, "layer", "xpay");
 	json_add_u64(req->js, "cutoff", clock_time().ts.tv_sec - 3600);
 	return send_outreq(req);
-}
-
-static void start_aging_timer(struct plugin *plugin)
-{
-	struct xpay *xpay = xpay_of(plugin);
-
-	if (xpay->dev_no_age)
-		return;
-	notleak(global_timer(plugin, time_from_sec(60), age_layer, NULL));
 }
 
 static struct command_result *xpay_layer_created(struct command *aux_cmd,
@@ -3081,24 +3075,7 @@ static struct command_result *xpay_layer_created(struct command *aux_cmd,
 						 const jsmntok_t *result,
 						 void *unused)
 {
-	start_aging_timer(aux_cmd->plugin);
 	return aux_command_done(aux_cmd);
-}
-
-static struct command_result *
-preapprovekeysend_succeed(struct command *cmd,
-			  const char *method,
-			  const char *buf,
-			  const jsmntok_t *result,
-			  struct payment *payment)
-{
-	/* Now we can conclude `check` command */
-	if (command_check_only(cmd)) {
-		return command_check_done(cmd);
-	}
-
-	/* Actually we don't need a private layer, but unification is easy. */
-	return populate_private_layer(cmd, payment);
 }
 
 static struct command_result *json_xkeysend(struct command *cmd,
@@ -3184,12 +3161,12 @@ static struct command_result *json_xkeysend(struct command *cmd,
 	/* We do pre-approval immediately (note: even if command_check_only!) */
 	if (command_check_only(cmd)) {
 		req = jsonrpc_request_start(cmd, "check",
-					    preapprovekeysend_succeed,
+					    preapprove_succeed,
 					    forward_error, payment);
 		json_add_string(req->js, "command_to_check", "preapprovekeysend");
 	} else {
 		req = jsonrpc_request_start(cmd, "preapprovekeysend",
-					    preapprovekeysend_succeed,
+					    preapprove_succeed,
 					    forward_error, payment);
 	}
 	json_add_pubkey(req->js, "destination", &payment->destination);
