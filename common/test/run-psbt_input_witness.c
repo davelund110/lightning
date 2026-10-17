@@ -2,6 +2,7 @@
 #include <bitcoin/tx.h>
 #include <ccan/array_size/array_size.h>
 #include <ccan/str/hex/hex.h>
+#include <stdarg.h>
 #include <common/setup.h>
 #include <stdio.h>
 #include "../amount.c"
@@ -141,8 +142,8 @@ static const struct {
 	  "81" },
 };
 
-static struct wally_psbt *psbt_with_witness(const char *sighex, size_t input,
-					    bool corrupt)
+static struct bitcoin_tx *tx_with_witness(const char *sighex, size_t input,
+					   bool corrupt)
 {
 	struct bitcoin_tx *tx = bitcoin_tx_from_hex(tmpctx, unsigned_tx,
 						    strlen(unsigned_tx));
@@ -165,7 +166,190 @@ static struct wally_psbt *psbt_with_witness(const char *sighex, size_t input,
 						  stack) == WALLY_OK);
 	wally_tx_witness_stack_free(stack);
 	tal_wally_end(tx->psbt);
-	return tx->psbt;
+	return tx;
+}
+
+static struct privkey privkey_of(u8 b)
+{
+	struct privkey k;
+	memset(k.secret.data, b, sizeof(k.secret.data));
+	return k;
+}
+
+static struct pubkey pubkey_of(const struct privkey *k)
+{
+	struct pubkey p;
+	assert(pubkey_from_privkey(k, &p));
+	return p;
+}
+
+/* A transaction spending one 100000 sat output, of @wscript if set. */
+static struct bitcoin_tx *spend(const u8 *spk, const u8 *wscript, u32 sequence)
+{
+	struct bitcoin_tx *tx = bitcoin_tx(tmpctx, chainparams, 1, 1, 0);
+	struct bitcoin_outpoint op;
+	struct privkey k = privkey_of(0x33);
+	struct pubkey p = pubkey_of(&k);
+
+	memset(&op.txid, 0x11, sizeof(op.txid));
+	op.n = 0;
+	bitcoin_tx_add_input(tx, &op, sequence, NULL, AMOUNT_SAT(100000),
+			     spk, wscript);
+	bitcoin_tx_add_output(tx, scriptpubkey_p2wpkh(tmpctx, &p), NULL,
+			      AMOUNT_SAT(90000));
+	return tx;
+}
+
+static u8 *sig_item(const struct bitcoin_tx *tx, const u8 *script_code,
+		    const struct privkey *k, enum sighash_type type)
+{
+	struct pubkey p = pubkey_of(k);
+	struct bitcoin_signature sig;
+	u8 der[73];
+	size_t len;
+
+	sign_tx_input(tx, 0, NULL, script_code, k, &p, type, &sig);
+	len = signature_to_der(der, &sig);
+	return tal_dup_arr(tmpctx, u8, der, len, 0);
+}
+
+static u8 **stack_of(size_t n, ...)
+{
+	u8 **stack = tal_arr(tmpctx, u8 *, n);
+	va_list ap;
+
+	va_start(ap, n);
+	for (size_t i = 0; i < n; i++)
+		stack[i] = va_arg(ap, u8 *);
+	va_end(ap);
+	return stack;
+}
+
+static bool ok(struct bitcoin_tx *tx, u8 **stack, bool unified)
+{
+	bitcoin_tx_input_set_witness(tx, 0, stack);
+	return psbt_input_witness_invalid(tmpctx, tx, 0, unified) == NULL;
+}
+
+static void test_p2wpkh(void)
+{
+	struct privkey k = privkey_of(0x01), other = privkey_of(0x02);
+	struct pubkey p = pubkey_of(&k), q = pubkey_of(&other);
+	const u8 *spk = scriptpubkey_p2wpkh(tmpctx, &p);
+	const u8 *code = p2wpkh_scriptcode(tmpctx, &p);
+	struct bitcoin_tx *tx = spend(spk, NULL, 0xfffffffd);
+	u8 *pk = tal_arr(tmpctx, u8, PUBKEY_CMPR_LEN);
+	u8 *qk = tal_arr(tmpctx, u8, PUBKEY_CMPR_LEN);
+
+	pubkey_to_der(pk, &p);
+	pubkey_to_der(qk, &q);
+	assert(ok(tx, stack_of(2, sig_item(tx, code, &k, SIGHASH_ALL), pk),
+		  false));
+	assert(ok(tx, stack_of(2, sig_item(tx, code, &k, SIGHASH_ALL), pk),
+		  true));
+	assert(ok(tx, stack_of(2, sig_item(tx, code, &k,
+					   SIGHASH_ALL|SIGHASH_UNIFIED), pk),
+		  true));
+	assert(!ok(tx, stack_of(2, sig_item(tx, code, &k,
+					    SIGHASH_ALL|SIGHASH_UNIFIED), pk),
+		   false));
+	/* Signed by another key, and with a key not in the output. */
+	assert(!ok(tx, stack_of(2, sig_item(tx, code, &other, SIGHASH_ALL), pk),
+		   false));
+	assert(!ok(tx, stack_of(2, sig_item(tx, code, &other, SIGHASH_ALL), qk),
+		   false));
+}
+
+static void test_p2wsh_2of2(void)
+{
+	struct privkey k1 = privkey_of(0x03), k2 = privkey_of(0x04);
+	struct pubkey p1 = pubkey_of(&k1), p2 = pubkey_of(&k2);
+	const u8 *script = bitcoin_redeem_2of2(tmpctx, &p1, &p2);
+	struct bitcoin_tx *tx = spend(NULL, script, 0xfffffffd);
+	u8 *empty = tal_arr(tmpctx, u8, 0), *junk = tal_arr(tmpctx, u8, 1);
+	u8 *first_key = tal_arr(tmpctx, u8, PUBKEY_CMPR_LEN);
+	const struct privkey *a, *b;
+	u8 *sa, *sb;
+
+	/* The script orders the keys; the signatures follow it. */
+	pubkey_to_der(first_key, &p1);
+	if (memeq(script + 2, PUBKEY_CMPR_LEN, first_key, PUBKEY_CMPR_LEN)) {
+		a = &k1;
+		b = &k2;
+	} else {
+		a = &k2;
+		b = &k1;
+	}
+	for (int unified = 0; unified < 2; unified++) {
+		enum sighash_type type = unified
+			? SIGHASH_ALL|SIGHASH_UNIFIED : SIGHASH_ALL;
+		sa = sig_item(tx, script, a, type);
+		sb = sig_item(tx, script, b, type);
+		assert(ok(tx, stack_of(4, empty, sa, sb,
+				       tal_dup_talarr(tmpctx, u8, script)),
+			  unified));
+		assert(!ok(tx, stack_of(4, empty, sb, sa,
+					tal_dup_talarr(tmpctx, u8, script)),
+			   unified));
+		junk[0] = 1;
+		assert(!ok(tx, stack_of(4, junk, sa, sb,
+					tal_dup_talarr(tmpctx, u8, script)),
+			   unified));
+	}
+}
+
+static void test_p2wsh_to_remote(void)
+{
+	static const u32 csvs[] = { 1, 16, 17, 0x7f, 0x80, 0x7fff };
+	struct privkey k = privkey_of(0x05);
+	struct pubkey p = pubkey_of(&k);
+
+	for (size_t c = 0; c < ARRAY_SIZE(csvs); c++) {
+		u32 csv = csvs[c];
+		const u8 *script = bitcoin_wscript_to_remote_anchored(tmpctx, &p,
+								     csv);
+		struct bitcoin_tx *tx;
+		u8 *sig;
+
+		/* Exactly the lock, more, and the flags BIP68 adds. */
+		tx = spend(NULL, script, csv);
+		sig = sig_item(tx, script, &k, SIGHASH_ALL);
+		assert(ok(tx, stack_of(2, sig, tal_dup_talarr(tmpctx, u8, script)),
+			  false));
+
+		tx = spend(NULL, script, csv - 1);
+		sig = sig_item(tx, script, &k, SIGHASH_ALL);
+		assert(!ok(tx, stack_of(2, sig, tal_dup_talarr(tmpctx, u8, script)),
+			   false));
+
+		tx = spend(NULL, script, csv | 0x80000000);
+		sig = sig_item(tx, script, &k, SIGHASH_ALL);
+		assert(!ok(tx, stack_of(2, sig, tal_dup_talarr(tmpctx, u8, script)),
+			   false));
+
+		tx = spend(NULL, script, csv | 0x00400000);
+		sig = sig_item(tx, script, &k, SIGHASH_ALL);
+		assert(!ok(tx, stack_of(2, sig, tal_dup_talarr(tmpctx, u8, script)),
+			   false));
+	}
+}
+
+static void test_p2wsh_unknown(void)
+{
+	struct privkey k = privkey_of(0x06);
+	struct pubkey p = pubkey_of(&k);
+	/* <key> OP_CHECKSIG: valid on chain, but not one we check. */
+	u8 *script = tal_arr(tmpctx, u8, 0);
+	struct bitcoin_tx *tx;
+
+	tal_arr_expand(&script, PUBKEY_CMPR_LEN);
+	tal_resize(&script, 1 + PUBKEY_CMPR_LEN);
+	pubkey_to_der(script + 1, &p);
+	tal_arr_expand(&script, 0xac);
+	tx = spend(NULL, script, 0xfffffffd);
+	assert(!ok(tx, stack_of(2, sig_item(tx, script, &k, SIGHASH_ALL),
+				tal_dup_talarr(tmpctx, u8, script)),
+		   false));
 }
 
 int main(int argc, char *argv[])
@@ -179,23 +363,28 @@ int main(int argc, char *argv[])
 			|| inputs[i].hash_type == 0x01;
 
 		for (int unified = 0; unified < 2; unified++) {
-			struct wally_psbt *psbt
-				= psbt_with_witness(inputs[i].sig,
-						    inputs[i].input, false);
+			struct bitcoin_tx *tx
+				= tx_with_witness(inputs[i].sig,
+						  inputs[i].input, false);
 			const char *bad
-				= psbt_input_witness_invalid(tmpctx, psbt,
+				= psbt_input_witness_invalid(tmpctx, tx,
 							     inputs[i].input,
 							     unified);
 			assert(allowed == (bad == NULL));
 			if (allowed) {
-				psbt = psbt_with_witness(inputs[i].sig,
-							 inputs[i].input, true);
-				assert(psbt_input_witness_invalid(tmpctx, psbt,
+				tx = tx_with_witness(inputs[i].sig,
+						     inputs[i].input, true);
+				assert(psbt_input_witness_invalid(tmpctx, tx,
 								  inputs[i].input,
 								  unified));
 			}
 		}
 	}
+
+	test_p2wpkh();
+	test_p2wsh_2of2();
+	test_p2wsh_to_remote();
+	test_p2wsh_unknown();
 
 	common_shutdown();
 	return 0;

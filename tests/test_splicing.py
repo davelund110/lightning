@@ -1022,6 +1022,21 @@ def test_splice_bad_input_witness(node_factory, bitcoind, l2_signs_second):
     l2.daemon.wait_for_log(r'Peer permanent failure in CHANNELD_.*Bad witness for splice tx')
     assert l2.daemon.is_in_log(r'channeld-chan#[0-9]+: peer_out WIRE_TX_SIGNATURES') != l2_signs_second
     assert not l2.daemon.is_in_log(r'Broadcasting splice tx')
+    if l2_signs_second:
+        return
+
+    # l1 holds a valid splice, and l2's commitments on the old funding
+    # output conflict with it, so the one which reached the mempool first
+    # confirms.  After the splice, a commitment spending it follows.
+    line = l1.daemon.wait_for_log(r'Broadcasting splice tx')
+    splice_txid = bitcoind.rpc.decoderawtransaction(line.split('Broadcasting splice tx ')[1].split()[0])['txid']
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    block = bitcoind.rpc.getblock(bitcoind.rpc.getbestblockhash(), 2)
+    if (splice_txid in [tx['txid'] for tx in block['tx']]
+            and not any(i.get('txid') == splice_txid for tx in block['tx'] for i in tx['vin'])):
+        bitcoind.generate_block(1, wait_for_mempool=1)
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['state'] == 'ONCHAIN')
 
 
 @pytest.mark.openchannel('v1')

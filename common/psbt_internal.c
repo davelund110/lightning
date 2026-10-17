@@ -191,7 +191,7 @@ static const struct wally_tx_output *spent_output(const struct wally_psbt *psbt,
 	return in->witness_utxo;
 }
 
-static bool bip341_keypath_digest(struct bitcoin_tx *tx, size_t i,
+static bool bip341_keypath_digest(const struct bitcoin_tx *tx, size_t i,
 				  u32 sighash, u8 digest[SHA256_LEN])
 {
 	struct wally_map scripts, values;
@@ -228,7 +228,7 @@ done:
 	return ok;
 }
 
-static const char *check_ecdsa(const tal_t *ctx, struct bitcoin_tx *tx,
+static const char *check_ecdsa(const tal_t *ctx, const struct bitcoin_tx *tx,
 			       size_t i, const struct wally_tx_witness_item *item,
 			       const u8 *script_code, const struct pubkey *key,
 			       bool unified)
@@ -248,7 +248,8 @@ static const char *check_ecdsa(const tal_t *ctx, struct bitcoin_tx *tx,
 }
 
 /* A funding output's 2-of-2, as when the peer splices another channel in. */
-static const char *check_p2wsh_2of2(const tal_t *ctx, struct bitcoin_tx *tx,
+static const char *check_p2wsh_2of2(const tal_t *ctx,
+				    const struct bitcoin_tx *tx,
 				    size_t i,
 				    const struct wally_tx_witness_stack *stack,
 				    const u8 *script, bool unified)
@@ -276,7 +277,7 @@ static const char *check_p2wsh_2of2(const tal_t *ctx, struct bitcoin_tx *tx,
 
 /* An anchor channel's to_remote output, as addpsbtinput may use. */
 static const char *check_p2wsh_to_remote(const tal_t *ctx,
-					 struct bitcoin_tx *tx, size_t i,
+					 const struct bitcoin_tx *tx, size_t i,
 					 const struct wally_tx_witness_stack *stack,
 					 const u8 *script, bool unified)
 {
@@ -315,21 +316,23 @@ static const char *check_p2wsh_to_remote(const tal_t *ctx,
 }
 
 const char *psbt_input_witness_invalid(const tal_t *ctx,
-				       struct wally_psbt *psbt, size_t i,
+				       const struct bitcoin_tx *tx, size_t i,
 				       bool unified)
 {
-	const struct wally_tx_witness_stack *stack = psbt->inputs[i].final_witness;
-	const struct wally_tx_output *spent = spent_output(psbt, i);
-	struct bitcoin_tx *tx;
+	const struct wally_psbt *psbt = tx->psbt;
+	const struct wally_tx_witness_stack *stack;
+	const struct wally_tx_output *spent;
 	struct sha256 wsh;
 	u8 xonly[32];
 
+	if (i >= psbt->num_inputs)
+		return tal_fmt(ctx, "no input %zu", i);
+	stack = psbt->inputs[i].final_witness;
+	spent = spent_output(psbt, i);
 	if (!spent)
 		return tal_fmt(ctx, "input %zu has no spent output", i);
 	if (!stack)
 		return tal_fmt(ctx, "input %zu has no witness", i);
-
-	tx = bitcoin_tx_with_psbt(tmpctx, psbt);
 
 	if (is_p2wpkh(spent->script, spent->script_len, NULL)) {
 		const struct wally_tx_witness_item *sig_item, *key_item;
