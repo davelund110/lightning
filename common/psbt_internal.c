@@ -248,6 +248,20 @@ static const char *check_ecdsa(const tal_t *ctx, const struct bitcoin_tx *tx,
 }
 
 /* A funding output's 2-of-2, as when the peer splices another channel in. */
+static bool is_2of2_script(const u8 *script, struct pubkey *k1,
+			   struct pubkey *k2)
+{
+	u8 *expected;
+
+	if (tal_bytelen(script) != 71
+	    || !pubkey_from_der(script + 2, 33, k1)
+	    || !pubkey_from_der(script + 36, 33, k2))
+		return false;
+	expected = bitcoin_redeem_2of2(tmpctx, k1, k2);
+	return memeq(expected, tal_bytelen(expected),
+		     script, tal_bytelen(script));
+}
+
 static const char *check_p2wsh_2of2(const tal_t *ctx,
 				    const struct bitcoin_tx *tx,
 				    size_t i,
@@ -256,15 +270,9 @@ static const char *check_p2wsh_2of2(const tal_t *ctx,
 {
 	struct pubkey k1, k2;
 	const char *bad;
-	u8 *expected;
 
 	if (stack->num_items != 4 || stack->items[0].witness_len != 0
-	    || tal_bytelen(script) != 71
-	    || !pubkey_from_der(script + 2, 33, &k1)
-	    || !pubkey_from_der(script + 36, 33, &k2))
-		return tal_fmt(ctx, "P2WSH input %zu is not a 2-of-2 spend", i);
-	expected = bitcoin_redeem_2of2(tmpctx, &k1, &k2);
-	if (!memeq(expected, tal_bytelen(expected), script, tal_bytelen(script)))
+	    || !is_2of2_script(script, &k1, &k2))
 		return tal_fmt(ctx, "P2WSH input %zu is not a 2-of-2 spend", i);
 
 	/* OP_CHECKMULTISIG takes the signatures in the keys' order. */
@@ -422,4 +430,87 @@ const char *psbt_input_witness_invalid(const tal_t *ctx,
 	}
 
 	return tal_fmt(ctx, "input %zu spends none of P2WPKH, P2WSH or P2TR", i);
+}
+
+bool psbt_input_witness_known(const struct bitcoin_tx *tx, size_t i)
+{
+	const struct wally_psbt *psbt = tx->psbt;
+	const struct wally_tx_witness_stack *stack;
+	const struct wally_tx_output *spent;
+	const struct wally_tx_witness_item *last;
+	struct sha256 wsh, h;
+	struct pubkey k1, k2;
+	u8 *script;
+
+	if (i >= psbt->num_inputs)
+		return true;
+	stack = psbt->inputs[i].final_witness;
+	spent = spent_output(psbt, i);
+	if (!spent || !stack || stack->num_items == 0)
+		return true;
+
+	if (is_p2wpkh(spent->script, spent->script_len, NULL))
+		return true;
+	last = &stack->items[stack->num_items - 1];
+	/* BIP341: a last item starting 0x50 is an annex, which is
+	 * non-standard, so it's judged (and fails). */
+	if (is_p2tr(spent->script, spent->script_len, NULL))
+		return stack->num_items == 1
+			|| (last->witness_len && last->witness[0] == 0x50);
+	if (!is_p2wsh(spent->script, spent->script_len, &wsh))
+		return false;
+
+	script = tal_dup_arr(tmpctx, u8, last->witness, last->witness_len, 0);
+	sha256(&h, script, tal_bytelen(script));
+	return stack->num_items < 2
+		|| !sha256_eq(&h, &wsh)
+		|| is_to_remote_anchored_witness_script(script,
+							tal_bytelen(script))
+		|| is_2of2_script(script, &k1, &k2);
+}
+
+struct bitcoin_tx *psbt_tx_with_spent_outputs(const tal_t *ctx,
+					      struct wally_psbt *psbt TAKES)
+{
+	if (!taken(psbt))
+		psbt = clone_psbt(tmpctx, psbt);
+	for (size_t i = 0; i < psbt->num_inputs; i++) {
+		const struct wally_psbt_input *in = &psbt->inputs[i];
+		const struct wally_tx_output *out;
+
+		/* Each digest then reads the spent output here, rather than
+		 * hashing the whole prevtx again for every input. */
+		if (!in->utxo || in->index >= in->utxo->num_outputs)
+			continue;
+		out = &in->utxo->outputs[in->index];
+		psbt_input_set_wit_utxo(psbt, i,
+					tal_dup_arr(tmpctx, u8, out->script,
+						    out->script_len, 0),
+					amount_sat(out->satoshi));
+	}
+	return bitcoin_tx_with_psbt(ctx, take(psbt));
+}
+
+const char *psbt_their_witnesses_invalid(const tal_t *ctx,
+					 const struct bitcoin_tx *tx,
+					 enum tx_role their_role,
+					 int input_index_to_ignore,
+					 bool unified, bool strict)
+{
+	for (size_t i = 0; i < tx->psbt->num_inputs; i++) {
+		u64 serial;
+		const char *bad;
+
+		if (i == input_index_to_ignore
+		    || !psbt_get_serial_id(&tx->psbt->inputs[i].unknowns,
+					   &serial)
+		    || serial % 2 != their_role)
+			continue;
+		if (!strict && !psbt_input_witness_known(tx, i))
+			continue;
+		bad = psbt_input_witness_invalid(ctx, tx, i, unified);
+		if (bad)
+			return bad;
+	}
+	return NULL;
 }

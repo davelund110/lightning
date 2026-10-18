@@ -3945,28 +3945,14 @@ static void check_their_witnesses(struct peer *peer,
 {
 	struct wally_psbt *checked;
 	struct bitcoin_tx *tx;
-	bool unified;
+	const char *bad;
 	size_t j = 0;
-
-	if (chainparams->is_elements)
-		return;
 
 	checked = clone_psbt(tmpctx, psbt);
 	for (size_t i = 0; i < checked->num_inputs; i++) {
 		struct wally_psbt_input *in = &checked->inputs[i];
 		u64 in_serial;
 
-		/* Each digest then reads the spent output here, rather than
-		 * hashing the whole prevtx again for every input. */
-		if (in->utxo && in->index < in->utxo->num_outputs) {
-			const struct wally_tx_output *out
-				= &in->utxo->outputs[in->index];
-			psbt_input_set_wit_utxo(checked, i,
-						tal_dup_arr(tmpctx, u8,
-							    out->script,
-							    out->script_len, 0),
-						amount_sat(out->satoshi));
-		}
 		if (i == splice_funding_index
 		    || !psbt_get_serial_id(&in->unknowns, &in_serial)
 		    || in_serial % 2 == our_role)
@@ -3981,29 +3967,25 @@ static void check_their_witnesses(struct peer *peer,
 				 "%zu too many witness elements received",
 				 tal_count(inws) - j);
 
-	tx = bitcoin_tx_with_psbt(tmpctx, take(checked));
+	/* We only know Bitcoin's digests. */
+	if (chainparams->is_elements)
+		return;
+	tx = psbt_tx_with_spent_outputs(tmpctx, take(checked));
 	if (!tx)
 		status_failed(STATUS_FAIL_INTERNAL_ERROR,
 			      "Could not build splice tx %s to check witnesses",
 			      fmt_bitcoin_txid(tmpctx, txid));
-	unified = channel_type_sighash(peer->channel->type, SIGHASH_ALL)
-		& SIGHASH_UNIFIED;
-
-	for (size_t i = 0; i < tx->psbt->num_inputs; i++) {
-		u64 in_serial;
-		const char *bad;
-
-		if (i == splice_funding_index
-		    || !psbt_get_serial_id(&tx->psbt->inputs[i].unknowns,
-					   &in_serial)
-		    || in_serial % 2 == our_role)
-			continue;
-		bad = psbt_input_witness_invalid(tmpctx, tx, i, unified);
-		if (bad)
-			peer_failed_err(peer->pps, &peer->channel_id,
-					"Bad witness for splice tx %s: %s",
-					fmt_bitcoin_txid(tmpctx, txid), bad);
-	}
+	bad = psbt_their_witnesses_invalid(tmpctx, tx,
+					   our_role == TX_INITIATOR
+					   ? TX_ACCEPTER : TX_INITIATOR,
+					   splice_funding_index,
+					   channel_type_sighash(peer->channel->type,
+								SIGHASH_ALL)
+					   & SIGHASH_UNIFIED, true);
+	if (bad)
+		peer_failed_err(peer->pps, &peer->channel_id,
+				"Bad witness for splice tx %s: %s",
+				fmt_bitcoin_txid(tmpctx, txid), bad);
 }
 
 /* Called to finish an ongoing splice OR on restart from channel_reestablish. */
