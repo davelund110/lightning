@@ -2227,6 +2227,7 @@ static void rbf_got_offer(struct subd *dualopend, const u8 *msg)
 	payload->feerate_our_min = feerate_min(dualopend->ld, NULL);
 
 	payload->psbt = NULL;
+	payload->our_funding = AMOUNT_SAT(0);
 
 	/* No error message known (yet) */
 	payload->err_msg = NULL;

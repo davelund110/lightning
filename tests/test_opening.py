@@ -2093,6 +2093,41 @@ def test_v2_open_unrecognized_input_before_we_sign(node_factory, bitcoind):
 
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.openchannel('v2')
+def test_v2_rbf_without_rbf_channel_plugin(node_factory, bitcoind):
+    """With no plugin on the rbf_channel hook, the accepter puts in nothing.
+
+    l2 runs without the funder plugin, so nothing answers rbf_channel and
+    it must still accept l1's RBF, contributing nothing.
+    """
+    l1, l2 = node_factory.get_nodes(2, opts=[{}, {'disable-plugin': 'funder'}])
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    chan_amount = 100000
+    l1.fundwallet(2**24)
+
+    res = l1.rpc.fundchannel(l2.info['id'], chan_amount)
+    chan_id = res['channel_id']
+    vin = only_one(bitcoind.rpc.decoderawtransaction(res['tx'])['vin'])
+    l1.daemon.wait_for_log(' to DUALOPEND_AWAITING_LOCKIN')
+
+    startweight = 42 + 172  # base weight, funding output
+    initpsbt = l1.rpc.utxopsbt(chan_amount, find_next_feerate(l1, l2), startweight,
+                               ["{}:{}".format(vin['txid'], vin['vout'])],
+                               reservedok=True, excess_as_change=True)['psbt']
+    bump = l1.rpc.openchannel_bump(chan_id, chan_amount, initpsbt)
+    update = l1.rpc.openchannel_update(chan_id, bump['psbt'])
+    assert update['commitments_secured']
+    l1.rpc.openchannel_signed(chan_id, l1.rpc.signpsbt(update['psbt'])['signed_psbt'])
+
+    bitcoind.generate_block(6, wait_for_mempool=1)
+    for n in (l1, l2):
+        n.daemon.wait_for_log(' to CHANNELD_NORMAL')
+    chan = only_one(l1.rpc.listpeerchannels()['channels'])
+    assert chan['funding_txid'] != res['txid']
+    assert chan['funding']['remote_funds_msat'] == Millisatoshi(0)
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.openchannel('v2')
 def test_v2_funding_spent_before_lockin(node_factory, bitcoind):
     """A dual-funded funding output spent before lock-in must go to onchaind.
 
