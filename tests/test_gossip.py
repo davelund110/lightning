@@ -2168,6 +2168,10 @@ def test_dump_own_gossip(node_factory):
     assert expect == []
 
 
+# devtools/gossipwith's node id, from its default secret.
+GOSSIPWITH_ID = '0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c'
+
+
 def test_gossip_throttle(node_factory, bitcoind, chainparams):
     """Make some gossip, test it gets throttled"""
     l1, l2, l3, l4 = node_factory.line_graph(4, wait_for_announce=True,
@@ -2205,7 +2209,13 @@ def test_gossip_throttle(node_factory, bitcoind, chainparams):
                           check=True,
                           timeout=TIMEOUT, stdout=subprocess.PIPE).stdout.split()
     time_slow = time.time() - start_slow
-    assert time_slow > 3
+    # A throttle waits at least a second; how many it takes depends on
+    # message sizes and the random flush delay, so check the log for it.
+    # It is logged once per connection, with whichever of traffic or CPU
+    # went over first.  gossipwith always uses the same key, so its id
+    # tells its throttles from l3's.
+    assert time_slow > 1
+    l4.daemon.wait_for_log(r'Throttling outgoing peer {}: too much'.format(GOSSIPWITH_ID))
 
     # Contents should be identical (once uniquified, since each
     # doubles-up on its own gossip)
@@ -2257,7 +2267,8 @@ def test_gossip_throttle(node_factory, bitcoind, chainparams):
                           check=True,
                           timeout=TIMEOUT, stdout=subprocess.PIPE).stdout.split()
     time_slow = time.time() - start_slow
-    assert time_slow > 3
+    assert time_slow > 1
+    l4.daemon.wait_for_log(r'Throttling outgoing peer {}: too much'.format(GOSSIPWITH_ID))
     assert set(out2) == set(out4)
 
 
