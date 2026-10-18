@@ -1854,6 +1854,47 @@ def test_rbf_refused_once_funding_confirmed(node_factory, bitcoind, chainparams)
 
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.openchannel('v2')
+def test_v2_open_accepter_psbt_without_locktime(node_factory, bitcoind):
+    """The accepter's PSBT takes the opener's locktime even if it has none.
+
+    l1 accepts l2's open, and then its RBF, with PSBTs of locktime 0, which
+    reach dualopend without a fallback locktime.  It has to use l2's
+    locktime anyway, or the two build different funding transactions and
+    the commitment signatures don't match.
+    """
+    plugin = os.path.join(os.getcwd(), 'tests/plugins/df_accept_no_locktime.py')
+    l1, l2 = node_factory.get_nodes(2, opts=[{'plugin': plugin,
+                                              'disable-plugin': 'funder'},
+                                             {}])
+    l1.fundwallet(2000000)
+    l2.fundwallet(2000000)
+    l2.rpc.connect(l1.info['id'], 'localhost', l1.port)
+    res = l2.rpc.fundchannel(l1.info['id'], 500000)
+    chan_id = res['channel_id']
+    l2.daemon.wait_for_log(' to DUALOPEND_AWAITING_LOCKIN')
+
+    prev = ['{}:{}'.format(o['txid'], o['output'])
+            for o in l2.rpc.listfunds()['outputs'] if o['reserved']]
+    initpsbt = l2.rpc.utxopsbt(500000, find_next_feerate(l2, l1), 42 + 172, prev,
+                               reservedok=True, excess_as_change=True)['psbt']
+    bump = l2.rpc.openchannel_bump(chan_id, 500000, initpsbt)
+    update = l2.rpc.openchannel_update(chan_id, bump['psbt'])
+    while not update['commitments_secured']:
+        update = l2.rpc.openchannel_update(chan_id, update['psbt'])
+    l2.rpc.openchannel_signed(chan_id, l2.rpc.signpsbt(update['psbt'])['signed_psbt'])
+
+    bitcoind.generate_block(6, wait_for_mempool=1)
+    for n in (l1, l2):
+        n.daemon.wait_for_log(' to CHANNELD_NORMAL')
+    chan = only_one(l2.rpc.listpeerchannels()['channels'])
+    assert chan['funding']['remote_funds_msat'] == Millisatoshi(100000 * 1000)
+    assert chan['funding_txid'] != res['txid']
+    tx = bitcoind.rpc.getrawtransaction(chan['funding_txid'], True)
+    assert tx['locktime'] != 0 and len(tx['vin']) == 2
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.openchannel('v2')
 def test_v2_funding_spent_before_lockin(node_factory, bitcoind):
     """A dual-funded funding output spent before lock-in must go to onchaind.
 

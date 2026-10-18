@@ -2457,6 +2457,24 @@ static void accept_tlv_add_offer(struct tlv_accept_tlvs *a_tlv,
 		= rates->channel_fee_max_proportional_thousandths;
 }
 
+/* As the accepter, our PSBT (if a plugin gave us one) must use their
+ * locktime.  On Bitcoin a zero one doesn't survive the trip from
+ * lightningd, so it may come without one: setting the field alone would
+ * be ignored. */
+static void set_accepter_psbt(struct tx_state *tx_state)
+{
+	if (!tx_state->psbt) {
+		tx_state->psbt = create_psbt(tx_state, 0, 0,
+					     tx_state->tx_locktime);
+		return;
+	}
+	if (!psbt_set_version(tx_state->psbt, 2))
+		status_failed(STATUS_FAIL_INTERNAL_ERROR,
+			      "Could not set PSBT version: %s",
+			      fmt_wally_psbt(tmpctx, tx_state->psbt));
+	wally_psbt_set_fallback_locktime(tx_state->psbt, tx_state->tx_locktime);
+}
+
 static void accepter_start(struct state *state, const u8 *oc2_msg)
 {
 	struct bitcoin_blkid chain_hash;
@@ -2657,19 +2675,7 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 						&tx_state->rates))
 		master_badmsg(WIRE_DUALOPEND_GOT_OFFER_REPLY, msg);
 
-	if (!tx_state->psbt)
-		tx_state->psbt = create_psbt(tx_state, 0, 0,
-					     tx_state->tx_locktime);
-	else {
-		/* Locktimes must match! */
-		tx_state->psbt->fallback_locktime = tx_state->tx_locktime;
-		if (!psbt_set_version(tx_state->psbt, 2)) {
-			status_failed(STATUS_FAIL_INTERNAL_ERROR,
-				      "Could not set PSBT version: %s",
-				      fmt_wally_psbt(tmpctx,
-						     tx_state->psbt));
-		}
-	}
+	set_accepter_psbt(tx_state);
 
 	/* BOLT- #2:
 	 *
@@ -3856,9 +3862,7 @@ static void rbf_remote_start(struct state *state, const u8 *rbf_msg)
 						    &tx_state->psbt))
 		master_badmsg(WIRE_DUALOPEND_GOT_RBF_OFFER_REPLY, msg);
 
-	if (!tx_state->psbt)
-		tx_state->psbt = create_psbt(tx_state, 0, 0,
-					     tx_state->tx_locktime);
+	set_accepter_psbt(tx_state);
 
 	/* Check that total funding doesn't overflow */
 	if (!amount_sat_add(&total, tx_state->opener_funding,
