@@ -457,8 +457,10 @@ bool psbt_input_witness_known(const struct bitcoin_tx *tx, size_t i)
 	if (is_p2tr(spent->script, spent->script_len, NULL))
 		return stack->num_items == 1
 			|| (last->witness_len && last->witness[0] == 0x50);
+	/* Spending any other witness program is non-standard, but for P2A
+	 * with an empty witness, which BOLT 2 doesn't allow either. */
 	if (!is_p2wsh(spent->script, spent->script_len, &wsh))
-		return false;
+		return true;
 
 	script = tal_dup_arr(tmpctx, u8, last->witness, last->witness_len, 0);
 	sha256(&h, script, tal_bytelen(script));

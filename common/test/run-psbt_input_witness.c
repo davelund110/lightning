@@ -318,6 +318,27 @@ static void test_p2wsh_unknown(void)
 	assert(known(tx, stack_of(1, tal_dup_talarr(tmpctx, u8, script))));
 }
 
+/* Spends of other witness programs are non-standard, so judged (bad). */
+static void test_other_programs(void)
+{
+	/* OP_2 <32 bytes>, and P2A (OP_1 <0x4e73>). */
+	u8 *v2 = tal_arrz(tmpctx, u8, 34), *p2a = tal_arr(tmpctx, u8, 4);
+	struct bitcoin_tx *tx;
+
+	v2[0] = 0x52;
+	v2[1] = 32;
+	tx = spend(v2, NULL, 0xfffffffd);
+	assert(known(tx, stack_of(1, tal_arrz(tmpctx, u8, 1))));
+	assert(!ok(tx, stack_of(1, tal_arrz(tmpctx, u8, 1)), true));
+
+	memcpy(p2a, "\x51\x02\x4e\x73", 4);
+	tx = spend(p2a, NULL, 0xfffffffd);
+	assert(known(tx, stack_of(0)));
+	assert(!ok(tx, stack_of(0), true));
+	assert(known(tx, stack_of(1, tal_arrz(tmpctx, u8, 1))));
+	assert(!ok(tx, stack_of(1, tal_arrz(tmpctx, u8, 1)), true));
+}
+
 static void test_p2tr_script_path(void)
 {
 	struct bitcoin_tx *tx = tx_with_witness(inputs[0].sig, inputs[0].input,
@@ -412,6 +433,7 @@ int main(int argc, char *argv[])
 	test_p2wsh_2of2();
 	test_p2wsh_to_remote();
 	test_p2wsh_unknown();
+	test_other_programs();
 	test_p2tr_script_path();
 	test_their_witnesses();
 

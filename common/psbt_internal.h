@@ -56,9 +56,10 @@ const char *psbt_input_witness_invalid(const tal_t *ctx,
 /* psbt_input_witness_known - Can psbt_input_witness_invalid judge it?
  *
  * False if input @i of @tx->psbt spends an output it doesn't evaluate: a
- * P2TR output other than by a key path, a P2WSH output with any other
- * witness script, or another kind of output.  A missing or empty witness,
- * or one that doesn't match its P2WSH output, can be judged (invalid).
+ * P2TR output other than by a key path, or a P2WSH output with any other
+ * witness script.  A missing or empty witness, one that doesn't match its
+ * P2WSH output, or a spend of any other kind of output (non-standard but
+ * for P2A with an empty witness) can be judged (invalid).
  */
 bool psbt_input_witness_known(const struct bitcoin_tx *tx, size_t i);
 

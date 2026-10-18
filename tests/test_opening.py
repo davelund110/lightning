@@ -5,7 +5,7 @@ from utils import (
     only_one, wait_for, sync_blockheight, first_channel_id, calc_lease_fee, check_coin_moves,
     scriptpubkey_addr, TIMEOUT
 )
-from pyln.testing.utils import FUNDAMOUNT
+from pyln.testing.utils import FUNDAMOUNT, BITCOIND_CONFIG
 from bitcoin.rpc import JSONRPCError
 
 from pathlib import Path
@@ -38,6 +38,27 @@ def _sha256(*parts):
 
 def _dsha256(b):
     return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+
+def _multisig_utxo(bitcoind):
+    """A 600000 sat 1-of-1 multisig P2WSH output in bitcoind's wallet."""
+    # A regtest WIF for a fixed key, in bitcoind's wallet as wsh(multi(1,...)).
+    alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    payload = b'\xef' + bytes([0x55] * 32) + b'\x01'
+    payload += _dsha256(payload)[:4]
+    n, wif = int.from_bytes(payload, 'big'), ''
+    while n:
+        n, r = divmod(n, 58)
+        wif = alphabet[r] + wif
+    desc = 'wsh(multi(1,{}))'.format(wif)
+    desc += '#' + bitcoind.rpc.getdescriptorinfo(desc)['checksum']
+    assert only_one(bitcoind.rpc.importdescriptors([{'desc': desc, 'timestamp': 'now'}]))['success']
+    addr = only_one(bitcoind.rpc.deriveaddresses(desc))
+    txid = bitcoind.rpc.sendtoaddress(addr, 0.006)
+    bitcoind.generate_block(1, wait_for_mempool=txid)
+    vout = only_one([o['n'] for o in bitcoind.rpc.getrawtransaction(txid, True)['vout']
+                     if o['scriptPubKey'].get('address') == addr])
+    return {'txid': txid, 'vout': vout}
 
 
 def hkdf_sha256(ikm, salt, info, length):
@@ -2006,25 +2027,8 @@ def test_v2_open_unrecognized_input_script(node_factory, bitcoind):
     l2.fundwallet(2000000)
     l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
 
-    # A regtest WIF for a fixed key, in bitcoind's wallet as wsh(multi(1,...)).
-    alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-    payload = b'\xef' + bytes([0x55] * 32) + b'\x01'
-    payload += _dsha256(payload)[:4]
-    n, wif = int.from_bytes(payload, 'big'), ''
-    while n:
-        n, r = divmod(n, 58)
-        wif = alphabet[r] + wif
-    desc = 'wsh(multi(1,{}))'.format(wif)
-    desc += '#' + bitcoind.rpc.getdescriptorinfo(desc)['checksum']
-    assert only_one(bitcoind.rpc.importdescriptors([{'desc': desc, 'timestamp': 'now'}]))['success']
-    addr = only_one(bitcoind.rpc.deriveaddresses(desc))
-    txid = bitcoind.rpc.sendtoaddress(addr, 0.006)
-    bitcoind.generate_block(1, wait_for_mempool=txid)
-    vout = only_one([o['n'] for o in bitcoind.rpc.getrawtransaction(txid, True)['vout']
-                     if o['scriptPubKey'].get('address') == addr])
-
     # 500000 sat to the channel, change back to bitcoind, the rest is fee.
-    psbt = bitcoind.rpc.createpsbt([{'txid': txid, 'vout': vout}],
+    psbt = bitcoind.rpc.createpsbt([_multisig_utxo(bitcoind)],
                                    [{bitcoind.rpc.getnewaddress(): 0.00095}])
     psbt = bitcoind.rpc.walletprocesspsbt(psbt, False)['psbt']
     start = l1.rpc.openchannel_init(l2.info['id'], 500000, psbt,
@@ -2043,6 +2047,48 @@ def test_v2_open_unrecognized_input_script(node_factory, bitcoind):
     for n in (l1, l2):
         n.daemon.wait_for_log(' to CHANNELD_NORMAL')
     assert not l2.daemon.is_in_log('Bad witness')
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.openchannel('v2')
+def test_v2_open_unrecognized_input_before_we_sign(node_factory, bitcoind):
+    """Before we sign, a peer input we can't evaluate fails the channel.
+
+    l1 accepts l2's open with an input from a 1-of-1 multisig P2WSH output
+    in bitcoind's wallet, and bitcoind signs it.  l1 signs first, so l2 has
+    not signed yet: it fails the channel rather than sign a funding tx it
+    can't check.
+    """
+    plugin = os.path.join(os.getcwd(), 'tests/plugins/df_external_input.py')
+    l1, l2 = node_factory.get_nodes(2, opts=[{'plugin': plugin,
+                                              'disable-plugin': 'funder',
+                                              'allow_warning': True},
+                                             {'allow_warning': True}])
+    l2.fundwallet(2000000)
+    l1.rpc.call('dfext_setup', {'utxo': _multisig_utxo(bitcoind),
+                                'change': {bitcoind.rpc.getnewaddress(): 0.00095},
+                                'amount': 500000,
+                                'url': 'http://127.0.0.1:{}/wallet/{}'.format(bitcoind.rpcport, 'lightningd-tests'),
+                                'auth': '{}:{}'.format(BITCOIND_CONFIG['rpcuser'], BITCOIND_CONFIG['rpcpassword'])})
+    l2.rpc.connect(l1.info['id'], 'localhost', l1.port)
+
+    psbt = l2.rpc.fundpsbt(500000, '3000perkw', 250, excess_as_change=True)['psbt']
+    start = l2.rpc.openchannel_init(l1.info['id'], 500000, psbt,
+                                    funding_feerate='3000perkw')
+    update = l2.rpc.openchannel_update(start['channel_id'], start['psbt'])
+    while not update['commitments_secured']:
+        update = l2.rpc.openchannel_update(start['channel_id'], update['psbt'])
+    assert len(bitcoind.rpc.decodepsbt(l2.rpc.setpsbtversion(update['psbt'], 0)['psbt'])['inputs']) == 2
+
+    line = l2.daemon.wait_for_log(r'Bad witness for funding tx [0-9a-f]{64}: P2WSH input [0-9]+ is not a 2-of-2 spend')
+    funding_txid = re.search(r'funding tx ([0-9a-f]{64})', line).group(1)
+    l1.daemon.wait_for_log(r'peer_out WIRE_TX_SIGNATURES')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['state'] == 'AWAITING_UNILATERAL')
+    with pytest.raises(RpcError):
+        l2.rpc.openchannel_signed(start['channel_id'],
+                                  l2.rpc.signpsbt(update['psbt'])['signed_psbt'])
+    assert not l2.daemon.is_in_log(r'peer_out WIRE_TX_SIGNATURES')
+    assert not l2.daemon.is_in_log('Broadcasting funding tx {}'.format(funding_txid))
 
 
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
