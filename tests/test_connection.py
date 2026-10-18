@@ -15,7 +15,7 @@ from utils import (
     mine_funding_to_announce, first_scid,
     CHANNEL_SIZE
 )
-from pyln.testing.utils import VALGRIND, EXPERIMENTAL_DUAL_FUND, FUNDAMOUNT, RUST, SLOW_MACHINE
+from pyln.testing.utils import VALGRIND, EXPERIMENTAL_DUAL_FUND, FUNDAMOUNT, RUST, SLOW_MACHINE, env
 
 import coincurve
 import hmac
@@ -1489,7 +1489,9 @@ def test_funding_cancel_race(node_factory, bitcoind, executor):
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()["outputs"]) != 0)
 
-    if VALGRIND:
+    # Under ASan 20 nodes alone use about 12GB, which with the other
+    # workers' nodes runs a CI runner out of memory.
+    if VALGRIND or env("ASAN", "0") == "1":
         num = 5
     elif SLOW_MACHINE:
         num = 20
@@ -1572,7 +1574,9 @@ def test_funding_v2_cancel_race(node_factory, bitcoind, executor):
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()["outputs"]) != 0)
 
-    if VALGRIND:
+    # Under ASan 20 nodes alone use about 12GB, which with the other
+    # workers' nodes runs a CI runner out of memory.
+    if VALGRIND or env("ASAN", "0") == "1":
         num = 5
     elif SLOW_MACHINE:
         num = 20
