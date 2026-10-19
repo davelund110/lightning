@@ -1359,6 +1359,60 @@ def test_splice_peer_aborts_unsigned_after_reconnect(node_factory, bitcoind, exe
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.parametrize("l1_initiates", [True, False])
+def test_splice_sigs_sent_after_commit(node_factory, bitcoind, executor, l1_initiates):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'may_fail': True,
+                                            'dev-splice-exit-before-sending-sigs': None},
+                                           {'may_reconnect': True}])
+    chan_id = l1.get_channel_id(l2)
+
+    # The initiator adds the shared input, so the accepter sends
+    # tx_signatures first: l1 sends second when it initiates, first when not.
+    if l1_initiates:
+        l2_log_start = len(l2.daemon.logs)
+        funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+        result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        assert result['commitments_secured'] is True
+        result = l1.rpc.signpsbt(result['psbt'])
+        executor.submit(l1.rpc.splice_signed, chan_id, result['signed_psbt'])
+    else:
+        l1.rpc.xpay(l2.rpc.invoice(300000000, 'push', 'push')['bolt11'])
+        l2_log_start = len(l2.daemon.logs)
+        funds_result = l2.rpc.addpsbtoutput(100000)
+        result = l2.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+        result = l2.rpc.splice_update(chan_id, result['psbt'])
+        executor.submit(l2.rpc.splice_update, chan_id, result['psbt'])
+
+    # lightningd exits before replying, so channeld must not send.
+    l1.daemon.wait_for_log(r'dev-splice-exit-before-sending-sigs')
+    wait_for(lambda: l1.daemon.proc.poll() is not None)
+    time.sleep(1)
+    assert not l2.daemon.is_in_log(r'channeld-chan#[0-9]*: peer_in WIRE_TX_SIGNATURES',
+                                   start=l2_log_start)
+
+    del l1.daemon.opts['dev-splice-exit-before-sending-sigs']
+    l1.start()
+    l1.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+    l2.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+
+    bitcoind.generate_block(6, wait_for_mempool=1)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-restart', 'after-restart')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_reserve_changes_at_reestablish(node_factory, bitcoind):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
                                      opts={'may_reconnect': True,
