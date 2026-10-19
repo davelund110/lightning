@@ -53,4 +53,33 @@ const char *psbt_input_witness_invalid(const tal_t *ctx,
 				       const struct bitcoin_tx *tx, size_t i,
 				       bool unified);
 
+/* psbt_input_witness_known - Can psbt_input_witness_invalid judge it?
+ *
+ * False if input @i of @tx->psbt spends an output it doesn't evaluate: a
+ * P2TR output other than by a key path, or a P2WSH output with any other
+ * witness script.  A missing or empty witness, one that doesn't match its
+ * P2WSH output, or a spend of any other kind of output (non-standard but
+ * for P2A with an empty witness) can be judged (invalid).
+ */
+bool psbt_input_witness_known(const struct bitcoin_tx *tx, size_t i);
+
+/* psbt_tx_with_spent_outputs - The tx of @psbt, with each input's spent
+ * output attached from its prevtx, for checking witnesses.  NULL if it
+ * can't be built. */
+struct bitcoin_tx *psbt_tx_with_spent_outputs(const tal_t *ctx,
+					      struct wally_psbt *psbt TAKES);
+
+/* psbt_their_witnesses_invalid - Check the witnesses of a side's inputs
+ *
+ * Returns NULL if every input of @their_role in @tx (but
+ * @input_index_to_ignore, or -1 for none) has a final witness that
+ * psbt_input_witness_invalid accepts, otherwise why not.  Unless @strict,
+ * inputs psbt_input_witness_known can't judge are skipped.  Bitcoin only.
+ */
+const char *psbt_their_witnesses_invalid(const tal_t *ctx,
+					 const struct bitcoin_tx *tx,
+					 enum tx_role their_role,
+					 int input_index_to_ignore,
+					 bool unified, bool strict);
+
 #endif /* LIGHTNING_COMMON_PSBT_INTERNAL_H */

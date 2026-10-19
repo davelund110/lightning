@@ -1375,6 +1375,9 @@ static void handle_tx_sigs(struct state *state, const u8 *msg)
 	struct bitcoin_txid txid;
 	const struct witness **witnesses;
 	struct tx_state *tx_state = state->tx_state;
+	struct bitcoin_tx *tx;
+	const char *bad;
+	size_t j = 0;
 
 	struct tlv_txsigs_tlvs *txsig_tlvs = tlv_txsigs_tlvs_new(tmpctx);
 	if (!fromwire_tx_signatures(tmpctx, msg, &cid, &txid,
@@ -1431,8 +1434,16 @@ static void handle_tx_sigs(struct state *state, const u8 *msg)
 			       "tx_signatures sent before commitment sigs %s",
 			       tal_hex(msg, msg));
 
+	/* A retransmit: lightningd has their witnesses already, and may have
+	 * broadcast with them. */
+	if (tx_state->remote_funding_sigs_rcvd) {
+		status_debug("Ignoring repeated tx_signatures for %s",
+			     fmt_bitcoin_txid(tmpctx, &txid));
+		return;
+	}
+
 	/* We put the PSBT + sigs all together */
-	for (size_t i = 0, j = 0; i < tx_state->psbt->num_inputs; i++) {
+	for (size_t i = 0; i < tx_state->psbt->num_inputs; i++) {
 		struct wally_psbt_input *in =
 			&tx_state->psbt->inputs[i];
 		u64 in_serial;
@@ -1452,6 +1463,31 @@ static void handle_tx_sigs(struct state *state, const u8 *msg)
 
 		psbt_finalize_input(tx_state->psbt, in, witnesses[j]);
 		j++;
+	}
+	if (j != tal_count(witnesses))
+		open_err_warn(state, "%zu too many witnesses in %s",
+			      tal_count(witnesses) - j, tal_hex(msg, msg));
+
+	/* Otherwise we may sign a funding tx that won't relay, while they
+	 * hold a valid copy (with the same txid).  Once we've sent our
+	 * signatures they have that anyway, so inputs we can't evaluate,
+	 * such as other P2WSH scripts, are then left to bitcoind. */
+	if (!chainparams->is_elements) {
+		tx = psbt_tx_with_spent_outputs(tmpctx, tx_state->psbt);
+		if (!tx)
+			status_failed(STATUS_FAIL_INTERNAL_ERROR,
+				      "Could not build funding tx %s to check"
+				      " witnesses",
+				      fmt_bitcoin_txid(tmpctx, &txid));
+		bad = psbt_their_witnesses_invalid(tmpctx, tx, their_role(state),
+						   -1,
+						   channel_type_sighash(state->channel_type,
+									SIGHASH_ALL)
+						   & SIGHASH_UNIFIED,
+						   !tx_state->local_funding_sigs_sent);
+		if (bad)
+			open_err_fatal(state, "Bad witness for funding tx %s: %s",
+				       fmt_bitcoin_txid(tmpctx, &txid), bad);
 	}
 
 	tx_state->remote_funding_sigs_rcvd = true;

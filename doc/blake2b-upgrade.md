@@ -130,8 +130,11 @@ Signatures a node makes **alone** opt in past the activation: on-chain sends,
 funding inputs it contributes, sweeps of its own outputs, anchor spends, and
 its own half of any second-level transaction it broadcasts. These are
 `ALL | UNIFIED` (`0x21`), and `0x21` also for taproot key-path spends, which
-use a 65-byte signature because `SIGHASH_DEFAULT` cannot carry the bit. No peer
-verifies these, so no peer has to agree.
+use a 65-byte signature because `SIGHASH_DEFAULT` cannot carry the bit. A peer
+checks our inputs to a splice, or to a dual-funded open before it has signed,
+when our `tx_signatures` arrive (after it has signed an open, only those of a
+kind it can evaluate), and accepts `0x21` on a channel with
+`option_unified_sigs`; nothing else here is verified by a peer.
 
 One exception, and it is deliberate: the justice transaction handed to a
 watchtower keeps the pre-activation hash type, because the tower reconstructs
