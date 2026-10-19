@@ -51,6 +51,8 @@ struct splice_command {
 	struct stfu_req_info *stfu_req_info;
 	/* A splice_init using the STFU some stfu_channels already got */
 	bool skip_stfu;
+	/* splice_signed: our broadcast of the splice answers it */
+	bool signing;
 };
 
 static u32 default_feerate(struct lightningd *ld, const struct channel *channel,
@@ -526,7 +528,21 @@ struct send_splice_info
 	u32 output_index;
 	const char *err_msg;
 	const struct wally_psbt *psbt;
+	/* The command pending when we broadcast, until it completes */
+	struct splice_command *cc;
 };
+
+static void clear_info_cc(struct splice_command *cc,
+			  struct send_splice_info *info)
+{
+	info->cc = NULL;
+}
+
+static void destroy_send_splice_info(struct send_splice_info *info)
+{
+	if (info->cc)
+		tal_del_destructor2(info->cc, clear_info_cc, info);
+}
 
 static void handle_tx_broadcast(struct send_splice_info *info)
 {
@@ -546,7 +562,7 @@ static void handle_tx_broadcast(struct send_splice_info *info)
 		wallet_transaction_add(ld->wallet, info->final_tx->wtx, 0, 0);
 	}
 
-	cc = splice_command_for_chan(ld, info->channel);
+	cc = info->cc;
 
 	if (cc) {
 		response = json_stream_success(cc->cmd);
@@ -567,11 +583,10 @@ static void check_utxo_block(struct bitcoind *bitcoind UNUSED,
 			     void *arg)
 {
 	struct send_splice_info *info = arg;
-	struct lightningd *ld = info->channel->peer->ld;
 	struct splice_command *cc;
 
 	if(!txout) {
-		cc = splice_command_for_chan(ld, info->channel);
+		cc = info->cc;
 		if (cc)
 			was_pending(command_fail(cc->cmd,
 						 SPLICE_BROADCAST_FAIL,
@@ -644,6 +659,10 @@ static void send_splice_tx(struct channel *channel,
 	info->output_index = output_index;
 	info->err_msg = NULL;
 	info->psbt = psbt;
+	info->cc = cc;
+	if (cc)
+		tal_add_destructor2(cc, clear_info_cc, info);
+	tal_add_destructor(info, destroy_send_splice_info);
 
 	bitcoind_sendrawtx(ld->topology->bitcoind,
 			   ld->topology->bitcoind,
@@ -693,7 +712,10 @@ static void handle_splice_confirmed_signed(struct lightningd *ld,
 		return;
 	}
 
+	/* Only a splice_signed waits on our broadcast */
 	cc = splice_command_for_chan(ld, channel);
+	if (cc && !cc->signing)
+		cc = NULL;
 
 	send_splice_tx(channel, tx, cc, output_index, inflight->funding_psbt);
 }
@@ -2575,6 +2597,7 @@ static struct command_result *json_splice_init(struct command *cmd,
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
 	cc->skip_stfu = *skip_stfu;
+	cc->signing = false;
 	cc->user_psbt_ver = initialpsbt->version;
 
 	if (initialpsbt->version != 2 && !psbt_set_version(initialpsbt, 2))
@@ -2631,6 +2654,7 @@ static struct command_result *json_splice_update(struct command *cmd,
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
 	cc->skip_stfu = false;
+	cc->signing = false;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2671,6 +2695,7 @@ static struct command_result *single_splice_signed(struct command *cmd,
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
 	cc->skip_stfu = false;
+	cc->signing = true;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2820,6 +2845,7 @@ static struct command_result *json_stfu_channels(struct command *cmd,
 		cc->channel = channel;
 		cc->stfu_req_info = req;
 		cc->skip_stfu = false;
+		cc->signing = false;
 
 		subd_send_msg(channel->owner, take(towire_channeld_stfu(NULL)));
 	}
