@@ -82,10 +82,10 @@ const char *feerate_style_name(enum feerate_style style);
 
 /* Sets *next_feerate to the smallest feerate which satisfies the BOLT #2
  * rule that the next funding transaction pays 25/24 times the feerate of
- * the previously constructed one, rounded down, and returns true.  Returns
- * false, leaving *next_feerate untouched, if last_feerate admits no such
- * value: it is 0, or 25/24 of it does not fit a u32, or rounding down lands
- * back on last_feerate.
+ * the previously constructed one, rounded down, and returns true.  Below 24
+ * that rounds back down to last_feerate, so it is last_feerate + 1 there.
+ * Returns false, leaving *next_feerate untouched, if last_feerate admits no
+ * such value: it is 0, or 25/24 of it does not fit a u32.
  *
  * last_feerate is generally read back out of the database, where a broken
  * fee estimator (ours or a peer's) may have left something absurd, so

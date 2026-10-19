@@ -1997,3 +1997,38 @@ def test_splice_abort_channels_refuses_one(node_factory, bitcoind):
     assert not l2.daemon.is_in_log('Peer permanent failure')
     wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
     l2.rpc.xpay(l3.rpc.invoice(10000, 'after', 'after')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_rbf_tiny_feerate(node_factory, bitcoind):
+    """Below 24 perkw, 25/24 rounds back to the same feerate: the next
+    one is one more, so such a splice can still be replaced."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+
+    # As if negotiated with ignore_fee_limits, which accepts down to 1.
+    for n in (l1, l2):
+        n.stop()
+        n.db_manip("UPDATE channel_funding_inflights SET funding_feerate=20;")
+    for n in (l1, l2):
+        n.start()
+    l1.connect(l2)
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['peer_connected'])
+        assert only_one(n.rpc.listpeerchannels()['channels'])['next_feerate'] == '21perkw'
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    l2.daemon.wait_for_log(r'peer_out WIRE_TX_ACK_RBF')
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
