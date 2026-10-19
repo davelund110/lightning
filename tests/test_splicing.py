@@ -2229,3 +2229,151 @@ def test_splice_stale_confirmed_stfu(node_factory, bitcoind):
     assert not l2.daemon.is_in_log('Peer permanent failure')
     wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
     l2.rpc.xpay(l3.rpc.invoice(10000, 'after', 'after')['bolt11'])
+
+
+def hold_splice_broadcast(node):
+    """Holds node's next sendrawtransaction until the returned Event is set."""
+    release = threading.Event()
+
+    def held_sendraw(r):
+        release.wait(TIMEOUT)
+        return None
+
+    node.daemon.rpcproxy.mock_rpc('sendrawtransaction', held_sendraw)
+    return release
+
+
+def release_splice_broadcast(node, release):
+    """Lets the held broadcast through and waits until lightningd has its result."""
+    release.set()
+    node.daemon.wait_for_log(r'plugin-bcli: sendrawtx exit 0')
+    node.daemon.rpcproxy.mock_rpc('sendrawtransaction', None)
+    # The bcli reply follows its log line on the same pipe.
+    node.rpc.getinfo()
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_late_broadcast_skips_splice_init(node_factory, bitcoind, executor):
+    """Our broadcast of a splice we accepted completes while our own
+    splice_init RBF of it waits on the peer: the broadcast must not answer
+    the splice_init."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-splice-rbf-any-feerate': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'disconnect': ['$WIRE_TX_ABORT'],
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    release = hold_splice_broadcast(l1)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l2, splice_txid)
+
+    # l2 refuses the RBF, but its tx_abort is dropped: the splice_init waits.
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    fut = executor.submit(l1.rpc.splice_init, chan_id, 100000, funds['psbt'],
+                          feerate_per_kw=last_feerate * 4)
+    l1.daemon.wait_for_log(r'peer_out WIRE_TX_INIT_RBF')
+    l2.daemon.wait_for_log(r'We are initiating tx_abort for reason: RBF feerate_perkw')
+
+    release_splice_broadcast(l1, release)
+    assert not fut.done()
+
+    # Nothing else answers it while the tx_abort is lost; a restart ends it.
+    l1.restart()
+    with pytest.raises(Exception):
+        fut.result(TIMEOUT)
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_late_broadcast_skips_stfu_channels(node_factory, bitcoind, executor):
+    """Our broadcast of a splice we accepted completes while the splice
+    plugin's stfu_channels waits: the broadcast must not answer it, which
+    crashed the plugin and with it lightningd."""
+    delay = 10 if VALGRIND or SLOW_MACHINE or os.getenv('ASAN', '0') == '1' else 3
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-delay-confirmed-stfu': delay,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    release = hold_splice_broadcast(l1)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l1, splice_txid)
+
+    # channeld holds its confirmed_stfu for `delay` seconds once quiescent.
+    fut = executor.submit(l1.rpc.splice,
+                          'wallet -> 50000 + fee@{}; 50000 -> {}'.format(last_feerate, chan_id))
+    l1.daemon.wait_for_logs([r'STFU initiator local',
+                             r'STFU complete: we are quiescent'])
+
+    release_splice_broadcast(l1, release)
+    assert not fut.done()
+
+    with pytest.raises(RpcError, match='at least {}'.format(last_feerate * 25 // 24)):
+        fut.result(TIMEOUT)
+    l1.rpc.getinfo()
+    assert [p['active'] for p in l1.rpc.plugin_list()['plugins']
+            if p['name'].endswith('/spenderp')] == [True]
+    l1.daemon.wait_for_log(r'We are initiating tx_abort for reason: requested by user'
+                           r'|Peer permanent failure')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_broadcast_skips_command_started_while_awaiting_sigs(node_factory, bitcoind, executor):
+    """l2 starts a splice while its channeld waits for l1's tx_signatures:
+    l2's broadcast of l1's splice must not answer it."""
+    # Keeps l2's stfu_channels pending until its broadcast has completed.
+    delay = 10 if VALGRIND or SLOW_MACHINE or os.getenv('ASAN', '0') == '1' else 3
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'dev-delay-confirmed-stfu': delay,
+                                            'log-level': ['debug', 'io:jsonrpc'],
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    l1.fundwallet(500000, addrtype="p2tr")
+    l2.fundwallet(500000, addrtype="p2tr")
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    l2.daemon.wait_for_logs([r'peer_out WIRE_TX_SIGNATURES',
+                             r'Splice: Awaiting signature message'])
+    feerate = only_one(only_one(l2.rpc.listpeerchannels()['channels'])['inflight'])['feerate']
+    last_feerate = int(feerate[:-len('perkw')])
+
+    # Its stfu_channels waits: channeld only reads it after the signatures.
+    fut = executor.submit(l2.rpc.splice,
+                          'wallet -> 50000 + fee@{}; 50000 -> {}'.format(last_feerate, chan_id))
+    l2.daemon.wait_for_log(r'stfu_channels#')
+    result = l1.rpc.signpsbt(result['psbt'])
+    txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+    wait_for(lambda: txid in bitcoind.rpc.getrawmempool())
+
+    with pytest.raises(RpcError, match='at least {}'.format(last_feerate * 25 // 24)):
+        fut.result(TIMEOUT)
+    l2.rpc.getinfo()
+    assert [p['active'] for p in l2.rpc.plugin_list()['plugins']
+            if p['name'].endswith('/spenderp')] == [True]
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+
+    check_splice_survives(l1, l2, bitcoind, txid)
