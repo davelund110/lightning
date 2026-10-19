@@ -1,5 +1,4 @@
 #include "config.h"
-#include <bitcoin/feerate.h>
 #include <bitcoin/psbt.h>
 #include <bitcoin/script.h>
 #include <ccan/array_size/array_size.h>
@@ -2098,6 +2097,27 @@ validate_splice_cmd(struct splice_cmd *splice_cmd)
 	return NULL;
 }
 
+/* A splice of a channel with a pending one replaces it, at no less than the
+ * next_feerate lightningd will hold it to.  Sets *feerate to that, or 0 if
+ * nothing is pending; false if lightningd gave no usable next_feerate. */
+static bool rbf_min_feerate(const char *buf, const jsmntok_t *jchannel,
+			    u32 *feerate)
+{
+	const jsmntok_t *tok;
+	jsmntok_t base;
+
+	*feerate = 0;
+	if (!json_get_member(buf, jchannel, "inflight"))
+		return true;
+
+	tok = json_get_member(buf, jchannel, "next_feerate");
+	if (!tok || !json_tok_endswith(buf, tok, "perkw"))
+		return false;
+	base = *tok;
+	base.end -= strlen("perkw");
+	return json_to_u32(buf, &base, feerate) && *feerate;
+}
+
 static struct command_result *listpeerchannels_get_result(struct command *cmd,
 				 const char *methodname,
 				 const char *buf,
@@ -2106,7 +2126,7 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 {
 	struct splice_script_error *error;
 	struct splice_script_chan **channels;
-	u32 *rbf_min_feerates;
+	const jsmntok_t **jchans;
 	struct command_result *result;
 	const jsmntok_t *jchannels, *jchannel;
 	char **lines;
@@ -2116,14 +2136,12 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 	const char *err;
 
 	channels = tal_arr(tmpctx, struct splice_script_chan*, 0);
-	rbf_min_feerates = tal_arr(tmpctx, u32, 0);
+	jchans = tal_arr(tmpctx, const jsmntok_t *, 0);
 	jchannels = json_get_member(buf, toks, "channels");
 	json_for_each_arr(i, jchannel, jchannels) {
-		const jsmntok_t *jinflights;
-
 		tal_arr_expand(&channels, tal(channels,
 					      struct splice_script_chan));
-		tal_arr_expand(&rbf_min_feerates, 0);
+		tal_arr_expand(&jchans, jchannel);
 
 		err = json_scan(tmpctx, buf, jchannel,
 				"{peer_id?:%,channel_id?:%}",
@@ -2134,38 +2152,6 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 		if (err)
 			errx(1, "Bad listpeerchannels.channels %zu: %s",
 			     i, err);
-
-		/* A splice on this channel will replace its last inflight */
-		jinflights = json_get_member(buf, jchannel, "inflight");
-		if (jinflights && jinflights->size) {
-			const jsmntok_t *jfeerate;
-			jsmntok_t base;
-			u32 last_feerate;
-
-			jfeerate = json_get_member(buf,
-						   json_get_arr(jinflights,
-								jinflights->size - 1),
-						   "feerate");
-			if (!jfeerate
-			    || !json_tok_endswith(buf, jfeerate, "perkw"))
-				errx(1, "Bad listpeerchannels.channels %zu:"
-				     " inflight feerate", i);
-			base = *jfeerate;
-			base.end -= strlen("perkw");
-			if (!json_to_u32(buf, &base, &last_feerate))
-				errx(1, "Bad listpeerchannels.channels %zu:"
-				     " inflight feerate", i);
-			if (!next_funding_feerate(last_feerate,
-						  &rbf_min_feerates[i]))
-				return command_fail(cmd,
-						    JSONRPC2_INVALID_PARAMS,
-						    "Can't calculate the next"
-						    " feerate: the last splice"
-						    " feerate recorded for"
-						    " channel %zu (%"PRIu32")"
-						    " is out of range",
-						    i, last_feerate);
-		}
 	}
 
 	if (splice_cmd->script) {
@@ -2209,12 +2195,23 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 		chan_id = splice_cmd->actions[i]->channel_id;
 		if (!chan_id)
 			continue;
-		for (size_t j = 0; j < tal_count(channels); j++)
-			if (channel_id_eq(chan_id, &channels[j]->chan_id)
-			    && rbf_min_feerates[j]
-			       > splice_cmd->rbf_min_feerate_per_kw)
-				splice_cmd->rbf_min_feerate_per_kw
-					= rbf_min_feerates[j];
+		for (size_t j = 0; j < tal_count(channels); j++) {
+			u32 rbf_min;
+
+			if (!channel_id_eq(chan_id, &channels[j]->chan_id))
+				continue;
+			if (!rbf_min_feerate(buf, jchans[j], &rbf_min))
+				return command_fail(cmd,
+						    JSONRPC2_INVALID_PARAMS,
+						    "Channel %s has a pending"
+						    " splice but no usable"
+						    " next_feerate to replace"
+						    " it at",
+						    fmt_channel_id(tmpctx,
+								   chan_id));
+			if (rbf_min > splice_cmd->rbf_min_feerate_per_kw)
+				splice_cmd->rbf_min_feerate_per_kw = rbf_min;
+		}
 	}
 
 	result = validate_splice_cmd(splice_cmd);

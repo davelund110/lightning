@@ -513,6 +513,10 @@ bool channel_funding_sigs_sent(const struct channel *channel);
 /* What's the last feerate used for a funding tx on this channel? */
 u32 channel_last_funding_feerate(const struct channel *channel);
 
+/* Does it have inflights a new splice would replace?  The memory-only ones
+ * are already locked in, and channeld doesn't see them. */
+bool channel_has_pending_inflights(const struct channel *channel);
+
 /* Only set completely_eliminate for never-existed channels */
 void delete_channel(struct channel *channel STEALS,
 		    bool completely_eliminate);

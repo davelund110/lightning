@@ -102,6 +102,9 @@ struct htlc_in *channel_has_htlc_in(const struct channel *channel UNNEEDED)
 /* Generated stub for channel_has_htlc_out */
 struct htlc_out *channel_has_htlc_out(const struct channel *channel UNNEEDED)
 { fprintf(stderr, "channel_has_htlc_out called!\n"); abort(); }
+/* Generated stub for channel_has_pending_inflights */
+bool channel_has_pending_inflights(const struct channel *channel UNNEEDED)
+{ fprintf(stderr, "channel_has_pending_inflights called!\n"); abort(); }
 /* Generated stub for channel_important_filter */
 bool channel_important_filter(const struct channel *channel UNNEEDED, void *unused UNNEEDED)
 { fprintf(stderr, "channel_important_filter called!\n"); abort(); }

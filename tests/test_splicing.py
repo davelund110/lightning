@@ -1784,7 +1784,11 @@ def test_splicein_rbf_feerate(node_factory, bitcoind):
     splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
     last_feerate = splice_feerate_of(l1, splice_txid)
 
+    next_feerate = only_one(l1.rpc.listpeerchannels()['channels'])['next_feerate']
+    assert next_feerate == '{}perkw'.format(last_feerate * 25 // 24)
+
     rbf_txid = l1.rpc.splicein(chan_id, "50000")['txid']
+    l1.daemon.wait_for_log(r'Raising feerate from [0-9]+ to {} perkw to replace'.format(last_feerate * 25 // 24))
 
     # At least 25/24 of the previous feerate, rounded down.
     for n in (l1, l2):

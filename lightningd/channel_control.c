@@ -2497,7 +2497,8 @@ static struct command_result *json_splice_init(struct command *cmd,
 	 *     `feerate` of the previously constructed transaction, rounded
 	 *     down.
 	 */
-	if (channel_current_inflight(channel)) {
+	/* As listpeerchannels' next_feerate, which the splice plugin uses */
+	if (channel_has_pending_inflights(channel)) {
 		u32 last_feerate = channel_last_funding_feerate(channel);
 		u32 next_feerate_min;
 
