@@ -2157,8 +2157,9 @@ def test_splice_locks_while_peer_awaits_sigs(node_factory, bitcoind):
     l2.daemon.wait_for_logs([r'Splice negotation, will not send commit, not recv commit,'
                              r' not send signature, recv signature as accepter',
                              r'peer_in WIRE_TX_SIGNATURES'])
-    for n in (l1, l2):
-        assert n.rpc.dev_memleak()['leaks'] == []
+    if not VALGRIND:
+        for n in (l1, l2):
+            assert n.rpc.dev_memleak()['leaks'] == []
 
     bitcoind.generate_block(5)
     l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
