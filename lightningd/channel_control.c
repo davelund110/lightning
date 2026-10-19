@@ -1608,10 +1608,12 @@ static void handle_confirmed_stfu(struct lightningd *ld,
 	}
 
 	cc = splice_command_for_chan(ld, channel);
+	/* e.g. stfu_channels failed on another of its channels before this
+	 * one got there: nobody will splice or abort it now, so leave STFU. */
 	if (!cc) {
-		channel_internal_error(channel, "confirmed_stfu"
-				       " received without an active command %s",
-				       tal_hex(channel, msg));
+		log_unusual(channel->log, "confirmed_stfu for a command which"
+			    " has gone: aborting it");
+		subd_send_msg(channel->owner, take(towire_channeld_abort(NULL)));
 		return;
 	}
 
