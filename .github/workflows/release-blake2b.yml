@@ -31,6 +31,7 @@ jobs:
   version:
     name: Resolve version
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       sha: ${{ steps.resolve.outputs.sha }}
@@ -41,6 +42,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve version and mtime
         id: resolve
@@ -60,7 +62,7 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             SHA=$(git rev-parse HEAD)
           else
-            if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?-blake2b\.[0-9]+$ ]]; then
+            if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-blake2b\.[0-9]+$ ]]; then
               echo "::error::'$VERSION' is not a vX.Y.Z-blake2b.N tag."
               exit 1
             fi
@@ -92,6 +94,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: version
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -108,6 +111,7 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build environment setup
         run: |
@@ -134,15 +138,16 @@ jobs:
           path: ${{ matrix.dir }}/clightning-*.tar.xz
           if-no-files-found: error
 
-  publish:
-    name: Checksum and draft release
+  checksum:
+    name: Checksum
     needs: [version, build]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    timeout-minutes: 10
     steps:
       - name: Git checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Download tarballs
         uses: actions/download-artifact@v8
@@ -157,8 +162,8 @@ jobs:
         run: |
           cd release
           set -- clightning-"$VERSION"-*.tar.xz
-          if [ $# -ne 6 ] || [ ! -e "$1" ]; then
-            echo "::error::Expected 6 tarballs for $VERSION, found: $*"
+          if [ $# -ne 6 ] || [ ! -e "$1" ] || [ "$(find . -type f | wc -l)" -ne 6 ]; then
+            echo "::error::Expected exactly 6 tarballs for $VERSION, found: $(ls)"
             exit 1
           fi
           LC_ALL=C sha256sum "$@" > SHA256SUMS-"$VERSION"
@@ -170,17 +175,41 @@ jobs:
         with:
           name: release-${{ needs.version.outputs.version }}
           path: release/
+          if-no-files-found: error
 
-      # A draft that already exists is left alone: it may already carry the
-      # captain's signature, so delete it by hand to build it again.
+  draft:
+    name: Draft release
+    needs: [version, checksum]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release-draft-${{ needs.version.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.version.outputs.version }}
+          path: release/
+
+      # A release that already exists is left alone: it may already carry the
+      # captain's signature, so delete it by hand to draft it again.
       - name: Draft release
-        if: needs.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if gh release view "$VERSION" >/dev/null 2>&1; then
+          if out=$(gh release view "$VERSION" --json tagName 2>&1); then
             echo "::error::Release $VERSION already exists."
             exit 1
+          elif [ "$out" != "release not found" ]; then
+            echo "::error::Could not check for release $VERSION: $out"
+            exit 1
           fi
-          gh release create "$VERSION" --draft --verify-tag --title "$VERSION" --notes "" release/*
+          cd release
+          gh release create "$VERSION" --draft --verify-tag --title "$VERSION" --notes "" \
+            clightning-"$VERSION"-*.tar.xz SHA256SUMS-"$VERSION" privkeyio-signing-key.asc
