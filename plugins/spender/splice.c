@@ -759,7 +759,9 @@ static struct command_result *onchain_wallet_fund(struct command *cmd,
 				       fmt_amount_sat(tmpctx, sats)));
 		json_add_sats(req->js, "satoshi", sats);
 		assert(splice_cmd->feerate_per_kw);
-		json_add_u32(req->js, "min_feerate", splice_cmd->feerate_per_kw);
+		json_add_string(req->js, "min_feerate",
+				tal_fmt(tmpctx, "%"PRIu32"perkw",
+					splice_cmd->feerate_per_kw));
 
 		plugin_log(cmd->plugin, LOG_DBG, "Adding input of at least %s",
 			   fmt_amount_sat(tmpctx, sats));
@@ -1003,7 +1005,9 @@ static struct command_result *splice_init(struct command *cmd,
 		json_add_sats(req->js, "relative_amount", amount_sat(0));
 	}
 	json_add_psbt(req->js, "initialpsbt", splice_cmd->psbt);
-	json_add_u32(req->js, "feerate_per_kw", splice_cmd->feerate_per_kw);
+	json_add_string(req->js, "feerate_per_kw",
+			tal_fmt(tmpctx, "%"PRIu32"perkw",
+				splice_cmd->feerate_per_kw));
 	json_add_bool(req->js, "skip_stfu", true);
 	json_add_bool(req->js, "force_feerate", splice_cmd->force_feerate);
 

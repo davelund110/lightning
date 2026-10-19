@@ -1724,3 +1724,19 @@ def test_splice_rbf_user_abort_keeps_signed_splice(node_factory, bitcoind):
     l1.rpc.unreserveinputs(funds['psbt'])
 
     check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splicein_feerate_units(node_factory, bitcoind):
+    """splicein announces the feerate it pays for, in the right units."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True)
+    chan_id = l1.get_channel_id(l2)
+    feerate = l1.rpc.feerates('perkw')['perkw']['splice']
+
+    txid = l1.rpc.splicein(chan_id, "100000")['txid']
+    for n in (l1, l2):
+        inflight = only_one(only_one(n.rpc.listpeerchannels()['channels'])['inflight'])
+        assert inflight['funding_txid'] == txid
+        assert inflight['feerate'] == '{}perkw'.format(feerate)
