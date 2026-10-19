@@ -4693,6 +4693,7 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 			       WIRE_CHANNELD_GOT_INFLIGHT);
 
 	new_inflight = inflights_new(peer);
+	peer->splicing->added_inflight = true;
 
 	psbt_txid(new_inflight, ictx->current_psbt,
 		  &new_inflight->outpoint.txid, NULL);
@@ -4998,6 +4999,7 @@ static void splice_initiator_user_finalized(struct peer *peer)
 			       WIRE_CHANNELD_GOT_INFLIGHT);
 
 	new_inflight = inflights_new(peer);
+	peer->splicing->added_inflight = true;
 
 	psbt_txid(tmpctx, ictx->current_psbt, &new_inflight->outpoint.txid,
 		  NULL);
@@ -5439,10 +5441,29 @@ static void handle_stfu_req(struct peer *peer, const u8 *inmsg)
 
 static void handle_abort_req(struct peer *peer, const u8 *inmsg)
 {
+	struct inflight *inflight = last_inflight(peer);
+
 	if (!fromwire_channeld_abort(inmsg))
 		master_badmsg(WIRE_CHANNELD_ABORT, inmsg);
 
-	splice_abort(peer, last_inflight(peer), "requested by user");
+	/* Only a candidate still being negotiated is ours to abort: the one
+	 * this negotiation added, or one a restart interrupted before we
+	 * signed it.  Anything else (e.g. the peer's splice, which an RBF
+	 * attempt sits on top of) is signed and must stay. */
+	if (peer->splicing) {
+		if (!peer->splicing->added_inflight)
+			inflight = NULL;
+	} else if (inflight && (inflight->i_sent_sigs
+				|| have_i_signed_inflight(peer, inflight)))
+		inflight = NULL;
+
+	/* e.g. the peer's tx_abort already ended it, and we restarted */
+	if (!inflight && !peer->splicing && !is_entering_stfu(peer)) {
+		status_info("Abort requested with no splice in progress");
+		return;
+	}
+
+	splice_abort(peer, inflight, "requested by user");
 }
 
 static void peer_in(struct peer *peer, const u8 *msg)

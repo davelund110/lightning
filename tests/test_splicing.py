@@ -1647,3 +1647,80 @@ def test_splice_peer_coinbase_input_aborted(node_factory, bitcoind):
 
     wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
     l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+
+def peer_splices_in(peer, node, chan_id, bitcoind):
+    """peer splices in 100k sats: signed by both sides and in the mempool."""
+    peer.fundwallet(500000)
+    txid = peer.rpc.splicein(chan_id, "100000")['txid']
+    peer.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    node.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    wait_for(lambda: txid in bitcoind.rpc.getrawmempool())
+    return txid
+
+
+def check_splice_survives(l1, l2, bitcoind, txid):
+    """Channel stays up on the one signed splice, which then confirms."""
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['peer_connected'])
+        chan = only_one(n.rpc.listpeerchannels()['channels'])
+        assert chan['state'] == 'CHANNELD_AWAITING_SPLICE'
+        assert [i['funding_txid'] for i in chan['inflight']] == [txid]
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+    bitcoind.generate_block(6, wait_for_mempool=txid)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    for n in (l1, l2):
+        chan = only_one(n.rpc.listpeerchannels()['channels'])
+        assert chan['funding_txid'] == txid
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-lock', 'after-lock')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splicein_peer_refuses_rbf(node_factory, bitcoind):
+    """splicein on top of the peer's pending splice is an RBF; when the peer
+    refuses it, the abort that follows must leave the peer's splice alone."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'dev-splice-abort-at-tx-complete': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+
+    with pytest.raises(RpcError, match='dev-splice-abort-at-tx-complete'):
+        l1.rpc.splicein(chan_id, "50000")
+    l1.daemon.wait_for_log(r'Abort requested with no splice in progress'
+                           r'|Peer permanent failure')
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_rbf_user_abort_keeps_signed_splice(node_factory, bitcoind):
+    """Aborting an RBF attempt aborts the attempt, not the splice under it."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'We are initiating tx_abort for reason: requested by user'
+                           r'|Peer permanent failure')
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)

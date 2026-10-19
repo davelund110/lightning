@@ -45,6 +45,8 @@ struct splicing {
 	bool force_sign_first;
 	/* After `splice` and `splice_ack` occur, we are in splice mode */
 	bool mode;
+	/* This negotiation has added its candidate to the inflights */
+	bool added_inflight;
 	/* Track how many of each tx collab msg we receive */
 	u16 tx_add_input_count, tx_add_output_count;
 	/* Current negoitated psbt */
