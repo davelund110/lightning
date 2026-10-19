@@ -1156,7 +1156,7 @@ static struct wally_psbt *sign_htlc_tx_mingle_unified(struct lightningd *ld,
 	struct bitcoin_signature sig;
 	u64 commit_num;
 	u8 **witness;
-	struct wally_tx_witness_stack *stack;
+	struct wally_tx_witness_stack *stack = NULL;
 	bool ok;
 
 	/* Drop our old signature, and ask for the new one. */
@@ -1201,12 +1201,15 @@ static struct wally_psbt *sign_htlc_tx_mingle_unified(struct lightningd *ld,
 							  info->wscript);
 
 	tal_wally_start();
-	wally_tx_witness_stack_init_alloc(tal_count(witness), &stack);
-	for (size_t i = 0; i < tal_count(witness); i++)
-		wally_tx_witness_stack_add(stack, witness[i],
-					   tal_bytelen(witness[i]));
-	ok = (wally_psbt_input_set_final_witness(&psbt->inputs[0], stack)
+	ok = (wally_tx_witness_stack_init_alloc(tal_count(witness), &stack)
 	      == WALLY_OK);
+	for (size_t i = 0; ok && i < tal_count(witness); i++)
+		ok = (wally_tx_witness_stack_add(stack, witness[i],
+						 tal_bytelen(witness[i]))
+		      == WALLY_OK);
+	if (ok)
+		ok = (wally_psbt_input_set_final_witness(&psbt->inputs[0],
+							 stack) == WALLY_OK);
 	wally_tx_witness_stack_free(stack);
 	tal_wally_end(psbt);
 	if (!ok)

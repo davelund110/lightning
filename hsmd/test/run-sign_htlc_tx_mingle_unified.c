@@ -58,11 +58,14 @@ static struct wally_psbt *htlc_psbt(const struct bitcoin_outpoint *htlc,
 	return tx->psbt;
 }
 
+/* coin NULL: no wallet utxos at all. */
 static const u8 *sign(const struct hsm_utxo *coin, struct wally_psbt *psbt,
 		      u32 htlc_input, const u8 *wscript)
 {
-	const struct hsm_utxo **utxos = tal_arr(tmpctx, const struct hsm_utxo *, 1);
-	utxos[0] = coin;
+	const struct hsm_utxo **utxos = tal_arr(tmpctx, const struct hsm_utxo *,
+						coin ? 1 : 0);
+	if (coin)
+		utxos[0] = coin;
 	return request(towire_hsmd_sign_htlc_tx_mingle_unified(tmpctx, &peer_id,
 							       dbid, utxos, psbt,
 							       commit_num,
@@ -193,6 +196,36 @@ int main(int argc, char *argv[])
 					    SIGHASH_SINGLE | SIGHASH_ANYONECANPAY
 					    | SIGHASH_UNIFIED) == WALLY_OK);
 	assert(!sign(&coin, psbt, 0, wscript));
+	/* Another input whose prevout we are not told, so cannot commit to.
+	 * Without wallet utxos, nothing else looks at it before our digest. */
+	{
+		struct bitcoin_outpoint other;
+		memset(&other.txid, 0x33, sizeof(other.txid));
+		other.n = 0;
+		psbt = htlc_psbt(&htlc, wscript, &coin, 2);
+		psbt_append_input(psbt, &other, 1, NULL, NULL, NULL);
+		assert(!sign(NULL, psbt, 0, wscript));
+		assert(!sign(&coin, psbt, 0, wscript));
+	}
+	/* Another input whose prevout and previous transaction disagree. */
+	{
+		struct bitcoin_tx *prev = bitcoin_tx(tmpctx, chainparams, 1, 1, 0);
+		struct bitcoin_outpoint other;
+		bitcoin_tx_add_input(prev, &htlc, 1, NULL, AMOUNT_SAT(9000), NULL, wscript);
+		bitcoin_tx_add_output(prev, coin.scriptPubkey, NULL, AMOUNT_SAT(8000));
+		bitcoin_txid(prev, &other.txid);
+		other.n = 0;
+		psbt = htlc_psbt(&htlc, wscript, &coin, 2);
+		psbt_append_input(psbt, &other, 1, NULL, NULL, NULL);
+		psbt_input_set_wit_utxo(psbt, 2, coin.scriptPubkey, AMOUNT_SAT(8001));
+		psbt_input_set_utxo(psbt, 2, prev->wtx);
+		assert(!sign(NULL, psbt, 0, wscript));
+		assert(!sign(&coin, psbt, 0, wscript));
+		/* Consistent, it is fine. */
+		psbt_input_set_wit_utxo(psbt, 2, coin.scriptPubkey, AMOUNT_SAT(8000));
+		assert(sign(NULL, psbt, 0, wscript));
+		assert(sign(&coin, psbt, 0, wscript));
+	}
 	/* While a request it can sign still succeeds. */
 	assert(sign(&coin, htlc_psbt(&htlc, wscript, &coin, 2), 0, wscript));
 

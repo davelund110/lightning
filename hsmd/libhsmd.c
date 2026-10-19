@@ -2036,6 +2036,8 @@ static u8 *handle_sign_htlc_tx_mingle_unified(struct hsmd_client *c,
 	const u8 *spk;
 	const struct wally_tx_output *htlc_utxo;
 	struct bitcoin_tx *tx;
+	struct unified_sighash_input exec = { .script_type = 1 };
+	struct sha256_double digest;
 	struct bitcoin_signature sig;
 	struct privkey htlc_privkey;
 	struct pubkey htlc_pubkey;
@@ -2104,8 +2106,16 @@ static u8 *handle_sign_htlc_tx_mingle_unified(struct hsmd_client *c,
 	tx = bitcoin_tx_with_psbt(tmpctx, psbt);
 	if (!tx)
 		return hsmd_status_bad_request(c, msg_in, "Cannot extract tx");
-	sign_tx_input(tx, htlc_input, NULL, wscript, &htlc_privkey,
-		      &htlc_pubkey, SIGHASH_ALL | SIGHASH_UNIFIED, &sig);
+	/* The digest covers every input's prevout, so it fails, rather
+	 * than us, if any of them is missing or inconsistent. */
+	exec.script_code = wscript;
+	if (!bitcoin_tx_unified_sighash(tx, htlc_input,
+					SIGHASH_ALL | SIGHASH_UNIFIED,
+					&exec, &digest.sha))
+		return hsmd_status_bad_request(c, msg_in,
+					       "Missing or inconsistent prevout data");
+	sig.sighash_type = SIGHASH_ALL | SIGHASH_UNIFIED;
+	sign_hash(&htlc_privkey, &digest, &sig.s);
 	check_overgrind(&sig);
 
 	return towire_hsmd_sign_htlc_tx_mingle_unified_reply(NULL, psbt, &sig);
