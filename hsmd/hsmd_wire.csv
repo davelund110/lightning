@@ -513,3 +513,21 @@ msgdata,hsmd_sign_htlc_tx_mingle,psbt,wally_psbt,
 
 msgtype,hsmd_sign_htlc_tx_mingle_reply,150
 msgdata,hsmd_sign_htlc_tx_mingle_reply,psbt,wally_psbt,
+
+# For option_unified_sigs channels: signs the wallet inputs, then our half
+# of the HTLC input SIGHASH_ALL over the final transaction.  Numbered well
+# clear of upstream's range.
+msgtype,hsmd_sign_htlc_tx_mingle_unified,600
+msgdata,hsmd_sign_htlc_tx_mingle_unified,peerid,node_id,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,channel_dbid,u64,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,num_inputs,u16,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,inputs,hsm_utxo,num_inputs
+msgdata,hsmd_sign_htlc_tx_mingle_unified,psbt,wally_psbt,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,commit_num,u64,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,htlc_input,u32,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,wscript_len,u16,
+msgdata,hsmd_sign_htlc_tx_mingle_unified,wscript,u8,wscript_len
+
+msgtype,hsmd_sign_htlc_tx_mingle_unified_reply,601
+msgdata,hsmd_sign_htlc_tx_mingle_unified_reply,psbt,wally_psbt,
+msgdata,hsmd_sign_htlc_tx_mingle_unified_reply,sig,bitcoin_signature,

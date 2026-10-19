@@ -166,6 +166,7 @@ bool hsmd_check_client_capabilities(struct hsmd_client *client,
 	case WIRE_HSMD_SIGN_ANY_LOCAL_HTLC_TX:
 	case WIRE_HSMD_SIGN_ANCHORSPEND:
 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE:
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED:
 	case WIRE_HSMD_SIGN_ANY_CANNOUNCEMENT_REQ:
 		return (client->capabilities & HSM_PERM_MASTER) != 0;
 
@@ -211,6 +212,7 @@ bool hsmd_check_client_capabilities(struct hsmd_client *client,
 	case WIRE_HSMD_CHECK_BIP86_PUBKEY_REPLY:
 	case WIRE_HSMD_SIGN_ANCHORSPEND_REPLY:
 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_REPLY:
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED_REPLY:
 	case WIRE_HSMD_SIGN_ANY_CANNOUNCEMENT_REPLY:
 		break;
 	}
@@ -1602,29 +1604,21 @@ static u8 *handle_sign_splice_tx(struct hsmd_client *c, const u8 *msg_in)
  *
  * The interfaces are very similar, so we have core functions that both
  * variants call after unwrapping the message. */
-static u8 *do_sign_local_htlc_tx(struct hsmd_client *c,
+
+/* Our htlc key on our own commitment @commit_num.  Returns NULL on
+ * success, otherwise the bad request reply to send. */
+static u8 *derive_local_htlc_key(struct hsmd_client *c,
 				 const u8 *msg_in,
-				 u32 input_num,
 				 const struct node_id *peerid,
 				 u64 channel_dbid,
 				 u64 commit_num,
-				 struct bitcoin_tx *tx,
-				 const u8 *wscript,
-				 bool option_anchor_outputs)
+				 struct privkey *htlc_privkey,
+				 struct pubkey *htlc_pubkey)
 {
 	struct secret channel_seed, htlc_basepoint_secret;
 	struct sha256 shaseed;
 	struct pubkey per_commitment_point, htlc_basepoint;
-	struct bitcoin_signature sig;
-	struct privkey htlc_privkey;
-	struct pubkey htlc_pubkey;
 
-	if (input_num >= tx->wtx->num_inputs)
-		return hsmd_status_bad_request_fmt(c, msg_in,
-						   "bad input %u of %zu",
-						   input_num, tx->wtx->num_inputs);
-
-	tx->chainparams = c->chainparams;
 	get_channel_seed(peerid, channel_dbid, &channel_seed);
 
 	if (!derive_shaseed(&channel_seed, &shaseed))
@@ -1644,13 +1638,43 @@ static u8 *do_sign_local_htlc_tx(struct hsmd_client *c,
 	if (!derive_simple_privkey(&htlc_basepoint_secret,
 				   &htlc_basepoint,
 				   &per_commitment_point,
-				   &htlc_privkey))
+				   htlc_privkey))
 		return hsmd_status_bad_request_fmt(
 		    c, msg_in, "Failed deriving htlc privkey");
 
-	if (!pubkey_from_privkey(&htlc_privkey, &htlc_pubkey))
+	if (!pubkey_from_privkey(htlc_privkey, htlc_pubkey))
 		return hsmd_status_bad_request_fmt(c, msg_in,
 						   "bad pubkey_from_privkey");
+
+	return NULL;
+}
+
+static u8 *do_sign_local_htlc_tx(struct hsmd_client *c,
+				 const u8 *msg_in,
+				 u32 input_num,
+				 const struct node_id *peerid,
+				 u64 channel_dbid,
+				 u64 commit_num,
+				 struct bitcoin_tx *tx,
+				 const u8 *wscript,
+				 bool option_anchor_outputs)
+{
+	struct bitcoin_signature sig;
+	struct privkey htlc_privkey;
+	struct pubkey htlc_pubkey;
+	enum sighash_type sighash_type;
+	u8 *err;
+
+	if (input_num >= tx->wtx->num_inputs)
+		return hsmd_status_bad_request_fmt(c, msg_in,
+						   "bad input %u of %zu",
+						   input_num, tx->wtx->num_inputs);
+
+	tx->chainparams = c->chainparams;
+	err = derive_local_htlc_key(c, msg_in, peerid, channel_dbid,
+				    commit_num, &htlc_privkey, &htlc_pubkey);
+	if (err)
+		return err;
 
 	if (tx->wtx->num_inputs != 1)
 		return hsmd_status_bad_request_fmt(c, msg_in,
@@ -1664,11 +1688,23 @@ static u8 *do_sign_local_htlc_tx(struct hsmd_client *c,
 	 * * if `option_anchors` applies to this commitment transaction,
 	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used as described in [BOLT #5]
 	 */
+	sighash_type = option_anchor_outputs
+		? (SIGHASH_SINGLE|SIGHASH_ANYONECANPAY)
+		: SIGHASH_ALL;
+
+	/* BOLT #5:
+	 * Otherwise, `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` MUST be used on the
+	 * HTLC signatures received from the peer, as this allows HTLC transactions to be combined with
+	 * other transactions.  The local signature MUST use `SIGHASH_ALL`, otherwise
+	 * anyone can attach additional inputs and outputs to the tx.
+	 */
+	/* A unified channel follows this: lightningd signs again, through
+	 * hsmd_sign_htlc_tx_mingle_unified, whenever it adds fee inputs. */
+	if (tx->psbt->inputs[input_num].sighash & SIGHASH_UNIFIED)
+		sighash_type = SIGHASH_ALL;
+
 	sign_tx_input(tx, input_num, NULL, wscript, &htlc_privkey, &htlc_pubkey,
-		      option_anchor_outputs
-		      ? (SIGHASH_SINGLE|SIGHASH_ANYONECANPAY)
-		      : SIGHASH_ALL,
-		      &sig);
+		      sighash_type, &sig);
 	check_overgrind(&sig);
 
 	return towire_hsmd_sign_tx_reply(NULL, &sig);
@@ -1985,6 +2021,106 @@ static u8 *handle_sign_htlc_tx_mingle(struct hsmd_client *c, const u8 *msg_in)
 	return towire_hsmd_sign_htlc_tx_mingle_reply(NULL, psbt);
 }
 
+/*~ Called from lightningd, for channels with option_unified_sigs: unlike
+ * hsmd_sign_htlc_tx_mingle, our half of the HTLC input is signed here, last,
+ * so it can commit to the whole transaction. */
+static u8 *handle_sign_htlc_tx_mingle_unified(struct hsmd_client *c,
+					      const u8 *msg_in)
+{
+	struct node_id peer_id;
+	u64 dbid, commit_num;
+	struct hsm_utxo **utxos;
+	struct wally_psbt *psbt;
+	u32 htlc_input;
+	u8 *wscript, *err;
+	const u8 *spk;
+	const struct wally_tx_output *htlc_utxo;
+	struct bitcoin_tx *tx;
+	struct unified_sighash_input exec = { .script_type = 1 };
+	struct sha256_double digest;
+	struct bitcoin_signature sig;
+	struct privkey htlc_privkey;
+	struct pubkey htlc_pubkey;
+
+	if (!fromwire_hsmd_sign_htlc_tx_mingle_unified(tmpctx, msg_in,
+						       &peer_id, &dbid,
+						       &utxos, &psbt,
+						       &commit_num,
+						       &htlc_input,
+						       &wscript))
+		return hsmd_status_malformed_request(c, msg_in);
+
+	if (is_elements(chainparams))
+		return hsmd_status_bad_request(c, msg_in,
+					       "No unified signing on elements");
+
+	/* SIGHASH_SINGLE pairs the HTLC input with its output. */
+	if (htlc_input >= psbt->num_inputs || htlc_input >= psbt->num_outputs)
+		return hsmd_status_bad_request_fmt(c, msg_in,
+						   "bad htlc input %u of %zu/%zu",
+						   htlc_input, psbt->num_inputs,
+						   psbt->num_outputs);
+
+	for (size_t i = 0; i < tal_count(utxos); i++) {
+		if (wally_psbt_input_spends(&psbt->inputs[htlc_input],
+					    &utxos[i]->outpoint))
+			return hsmd_status_bad_request(c, msg_in,
+						       "HTLC input given as wallet utxo");
+	}
+
+	htlc_utxo = psbt->inputs[htlc_input].witness_utxo;
+	spk = scriptpubkey_p2wsh(tmpctx, wscript);
+	if (!htlc_utxo
+	    || !memeq(htlc_utxo->script, htlc_utxo->script_len,
+		      spk, tal_bytelen(spk)))
+		return hsmd_status_bad_request(c, msg_in,
+					       "HTLC input does not spend wscript");
+
+	if (psbt->inputs[htlc_input].sighash != 0
+	    && psbt->inputs[htlc_input].sighash != (SIGHASH_ALL | SIGHASH_UNIFIED))
+		return hsmd_status_bad_request_fmt(c, msg_in,
+						   "bad HTLC input sighash 0x%x",
+						   psbt->inputs[htlc_input].sighash);
+	if (wally_psbt_input_set_sighash(&psbt->inputs[htlc_input],
+					 SIGHASH_ALL | SIGHASH_UNIFIED) != WALLY_OK)
+		return hsmd_status_bad_request(c, msg_in,
+					       "Cannot set HTLC input sighash");
+
+	err = derive_local_htlc_key(c, msg_in, &peer_id, dbid, commit_num,
+				    &htlc_privkey, &htlc_pubkey);
+	if (err)
+		return err;
+
+	/* Sign the wallet inputs first: that can rewrite their prevout
+	 * scripts and amounts, which our signature below commits to. */
+	if (!sign_our_inputs(utxos, psbt))
+		return hsmd_status_bad_request(c, msg_in,
+					       "Cannot sign wallet inputs");
+
+	/* BOLT #5:
+	 * Otherwise, `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` MUST be used on the
+	 * HTLC signatures received from the peer, as this allows HTLC transactions to be combined with
+	 * other transactions.  The local signature MUST use `SIGHASH_ALL`, otherwise
+	 * anyone can attach additional inputs and outputs to the tx.
+	 */
+	tx = bitcoin_tx_with_psbt(tmpctx, psbt);
+	if (!tx)
+		return hsmd_status_bad_request(c, msg_in, "Cannot extract tx");
+	/* The digest covers every input's prevout, so it fails, rather
+	 * than us, if any of them is missing or inconsistent. */
+	exec.script_code = wscript;
+	if (!bitcoin_tx_unified_sighash(tx, htlc_input,
+					SIGHASH_ALL | SIGHASH_UNIFIED,
+					&exec, &digest.sha))
+		return hsmd_status_bad_request(c, msg_in,
+					       "Missing or inconsistent prevout data");
+	sig.sighash_type = SIGHASH_ALL | SIGHASH_UNIFIED;
+	sign_hash(&htlc_privkey, &digest, &sig.s);
+	check_overgrind(&sig);
+
+	return towire_hsmd_sign_htlc_tx_mingle_unified_reply(NULL, psbt, &sig);
+}
+
 /*~ This is another lightningd-only interface; signing a commit transaction.
  * This is dangerous, since if we sign a revoked commitment tx we'll lose
  * funds, thus it's only available to lightningd.
@@ -2163,6 +2299,7 @@ static u8 *do_sign_remote_htlc_to_us(struct hsmd_client *c,
 	struct secret channel_seed, htlc_basepoint_secret;
 	struct pubkey htlc_basepoint;
 	struct privkey privkey;
+	enum sighash_type sighash_type;
 
 	tx->chainparams = c->chainparams;
 	get_channel_seed(peerid, channel_dbid, &channel_seed);
@@ -2185,10 +2322,18 @@ static u8 *do_sign_remote_htlc_to_us(struct hsmd_client *c,
 	 * * if `option_anchors` applies to this commitment transaction,
 	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used as described in [BOLT #5]
 	 */
-	return handle_sign_to_us_tx(
-	    c, msg_in, input_num, tx, &privkey, wscript,
-	    option_anchor_outputs ? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
-				  : SIGHASH_ALL);
+	sighash_type = option_anchor_outputs
+		? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
+		: SIGHASH_ALL;
+
+	/* Nobody else signs this one, and lightningd signs it again for every
+	 * fee change, so a unified channel commits to the whole tx. */
+	if (input_num < tx->psbt->num_inputs
+	    && (tx->psbt->inputs[input_num].sighash & SIGHASH_UNIFIED))
+		sighash_type = SIGHASH_ALL;
+
+	return handle_sign_to_us_tx(c, msg_in, input_num, tx, &privkey,
+				    wscript, sighash_type);
 }
 
 /*~ When called by onchaind */
@@ -2455,6 +2600,8 @@ u8 *hsmd_handle_client_message(const tal_t *ctx, struct hsmd_client *client,
 		return handle_sign_anchorspend(client, msg);
 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE:
 		return handle_sign_htlc_tx_mingle(client, msg);
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED:
+		return handle_sign_htlc_tx_mingle_unified(client, msg);
 
 	case WIRE_HSMD_DEV_MEMLEAK:
 	case WIRE_HSMD_ECDH_RESP:
@@ -2496,6 +2643,7 @@ u8 *hsmd_handle_client_message(const tal_t *ctx, struct hsmd_client *client,
 	case WIRE_HSMD_CHECK_BIP86_PUBKEY_REPLY:
 	case WIRE_HSMD_SIGN_ANCHORSPEND_REPLY:
 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_REPLY:
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED_REPLY:
 	case WIRE_HSMD_SIGN_ANY_CANNOUNCEMENT_REPLY:
 		break;
 	}
@@ -2581,6 +2729,7 @@ u8 *hsmd_init(const u8 *secret_data, size_t secret_len, const u64 hsmd_version,
 		WIRE_HSMD_SIGN_ANY_DELAYED_PAYMENT_TO_US,
 		WIRE_HSMD_SIGN_ANCHORSPEND,
 		WIRE_HSMD_SIGN_HTLC_TX_MINGLE,
+		WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED,
 		WIRE_HSMD_SIGN_SPLICE_TX,
 		WIRE_HSMD_CHECK_OUTPOINT,
 		WIRE_HSMD_FORGET_CHANNEL,
