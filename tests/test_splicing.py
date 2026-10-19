@@ -1831,3 +1831,31 @@ def test_splice_rbf_feerate_too_low(node_factory, bitcoind):
     l1.rpc.unreserveinputs(funds['psbt'])
 
     check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_rbf_feerate_too_low_peer_refuses(node_factory, bitcoind):
+    """We answer an RBF below 25/24 of the last splice feerate with tx_abort."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-splice-rbf-any-feerate': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l2, splice_txid)
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    with pytest.raises(RpcError, match='below 25/24 of the last splice feerate_perkw {}'.format(last_feerate)):
+        # A bare number is perkb.
+        l1.rpc.splice_init(chan_id, 100000, funds['psbt'],
+                           feerate_per_kw=last_feerate * 4)
+    l2.daemon.wait_for_log(r'We are initiating tx_abort for reason: RBF feerate_perkw')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)

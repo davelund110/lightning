@@ -1967,6 +1967,7 @@ bool peer_start_channeld(struct channel *channel,
 		infcopy->force_sign_first = inflight->force_sign_first;
 		infcopy->locked_scid = tal_dup_or_null(infcopy, struct short_channel_id, inflight->locked_scid);
 		infcopy->i_sent_sigs = inflight->i_sent_sigs;
+		infcopy->feerate = inflight->funding->feerate;
 
 		tal_wally_start();
 		wally_psbt_clone_alloc(inflight->funding_psbt, 0, &infcopy->psbt);
@@ -2504,7 +2505,8 @@ static struct command_result *json_splice_init(struct command *cmd,
 					    " for this channel (%u) is out of"
 					    " range",
 					    last_feerate);
-		if (*feerate_per_kw < next_feerate_min) {
+		if (*feerate_per_kw < next_feerate_min
+		    && !cmd->ld->dev_splice_rbf_any_feerate) {
 			if (explicit_feerate)
 				return command_fail(cmd,
 						    JSONRPC2_INVALID_PARAMS,

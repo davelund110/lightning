@@ -917,6 +917,10 @@ static void dev_register_opts(struct lightningd *ld)
 		     opt_set_bool,
 		     &ld->dev_splice_abort_at_tx_complete,
 		     "Send tx_abort on every splice we accept, once it completes");
+	clnopt_noarg("--dev-splice-rbf-any-feerate", OPT_DEV,
+		     opt_set_bool,
+		     &ld->dev_splice_rbf_any_feerate,
+		     "Let splice_init replace a pending splice at any feerate");
 	clnopt_noarg("--dev-splice-corrupt-shared-sig", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_splice_corrupt_shared_sig,

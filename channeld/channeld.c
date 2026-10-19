@@ -4593,6 +4593,28 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 				 funding_feerate_perkw,
 				 accepted_feerate_max(peer));
 
+	/* BOLT #2:
+	 * The recipient:  ...
+	 *   - MUST respond with `tx_abort` if:
+	 *     - the `feerate` is not greater than or equal to 25/24 times `feerate`
+	 *       of the last successfully constructed transaction
+	 */
+	/* Unlike the bounds above, this is an honest disagreement a peer can
+	 * fix by retrying higher, so we tx_abort as required rather than
+	 * disconnect.  Like the other refusals below, splice_abort() waits
+	 * for the ack. */
+	if (type == WIRE_TX_INIT_RBF) {
+		u32 last_feerate = last_inflight(peer)->feerate;
+		u32 next_feerate_min;
+
+		if (!next_funding_feerate(last_feerate, &next_feerate_min)
+		    || funding_feerate_perkw < next_feerate_min)
+			splice_abort(peer, NULL,
+				     "RBF feerate_perkw %u is below 25/24 of"
+				     " the last splice feerate_perkw %u",
+				     funding_feerate_perkw, last_feerate);
+	}
+
 	peer->splicing->feerate_per_kw = funding_feerate_perkw;
 
 	/* TODO: Add plugin hook for user to adjust accepter amount */
@@ -4708,6 +4730,7 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
 	new_inflight->remote_tx_sigs = false;
+	new_inflight->feerate = funding_feerate_perkw;
 
 	current_push_val = relative_splice_balance_fundee(peer, our_role,ictx->current_psbt,
 					  outpoint.n, splice_funding_index);
@@ -5013,6 +5036,7 @@ static void splice_initiator_user_finalized(struct peer *peer)
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
 	new_inflight->remote_tx_sigs = false;
+	new_inflight->feerate = peer->splicing->feerate_per_kw;
 
 	audit_psbt(ictx->current_psbt, ictx->current_psbt);
 

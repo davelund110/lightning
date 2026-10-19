@@ -375,6 +375,10 @@ struct lightningd {
 	 * completes, so the initiator's handling of it can be tested. */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Let splice_init propose an RBF below 25/24 of the last feerate, so
+	 * the peer's refusal can be tested. */
+	bool dev_splice_rbf_any_feerate;
+
 	/* Send a corrupted shared_input_signature, so the peer's check can
 	 * be tested. */
 	bool dev_splice_corrupt_shared_sig;
