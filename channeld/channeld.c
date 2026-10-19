@@ -5334,6 +5334,13 @@ static void handle_splice_stfu_success(struct peer *peer)
 	peer_write(peer->pps, take(msg));
 }
 
+/* Refusing it, we're not splicing after all */
+static void splice_init_refused(struct peer *peer, const u8 *msg TAKES)
+{
+	peer->splicing = tal_free(peer->splicing);
+	wire_sync_write(MASTER_FD, msg);
+}
+
 /* User has begun a splice with `splice_init` command. Here we request entry
  * into STFU mode, when we get it, send `splice` to our peer->
  * Later the peer will send `splice_ack` and the code that starts the actual
@@ -5366,14 +5373,14 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while waiting"
 							 " for STFU.");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (!skip_stfu && is_stfu_active(peer)) {
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while"
 							 " currently in STFU");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (skip_stfu && !is_stfu_active(peer)) {
@@ -5381,14 +5388,14 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 							 " splice with"
 							 " skip_stfu if not"
 							 " already in STFU");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (peer->splicing->mode) {
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while already"
 							 " doing a splice.");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (peer->splicing->feerate_per_kw < accepted_feerate_min(peer)) {
@@ -5399,7 +5406,7 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 							 " %u",
 							 peer->splicing->feerate_per_kw,
 							 accepted_feerate_min(peer)));
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	/* We initiated, so this is our money: hold it to what we're
@@ -5415,7 +5422,7 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 						 " %u",
 						 peer->splicing->feerate_per_kw,
 						 proposed_feerate_max(peer)));
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 

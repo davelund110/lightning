@@ -2032,3 +2032,37 @@ def test_splice_rbf_tiny_feerate(node_factory, bitcoind):
     l1.rpc.unreserveinputs(funds['psbt'])
 
     check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_init_refused_leaves_no_splice(node_factory, bitcoind):
+    """A splice_init channeld refuses leaves nothing behind to abort, and
+    doesn't block the next splice."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    with pytest.raises(RpcError, match='Feerate 120000 is too high'):
+        # A bare number is perkb.
+        l1.rpc.splice_init(chan_id, 100000, funds['psbt'], feerate_per_kw=120000 * 4)
+
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Abort requested with no splice in progress'
+                           r'|We are initiating tx_abort')
+    assert not l1.daemon.is_in_log(r'We are initiating tx_abort')
+
+    result = l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+
+    bitcoind.generate_block(6, wait_for_mempool=txid)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    assert not l1.daemon.is_in_log('Peer permanent failure')
