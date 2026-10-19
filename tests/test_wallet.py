@@ -2948,3 +2948,29 @@ def test_withdraw_unreserves_on_broadcast_failure(node_factory, bitcoind):
     bitcoind.generate_block(1)
     sync_blockheight(bitcoind, [l1])
     assert l1.db_query('SELECT COUNT(*) as c FROM outputs WHERE status=0')[0]['c'] == 0
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd anchors not supported')
+def test_withdraw_anchor_to_remote_min_feerate(node_factory, bitcoind):
+    """The to_remote output of an anchor channel's unilateral close is spent
+    at the minimum feerate: its weight estimate covers the witness script."""
+    l1, l2 = node_factory.line_graph(2)
+    l1.pay(l2, 200000000)
+    l1.rpc.dev_fail(l2.info['id'])
+    l1.wait_for_channel_onchain(l2.info['id'])
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    sync_blockheight(bitcoind, [l2])
+
+    wait_for(lambda: [o for o in l2.rpc.listfunds()['outputs']
+                      if o['scriptpubkey'].startswith('0020')] != [])
+    utxo = only_one([o for o in l2.rpc.listfunds()['outputs']
+                     if o['scriptpubkey'].startswith('0020')])
+    # Its csv lock is one block.
+    bitcoind.generate_block(1)
+    sync_blockheight(bitcoind, [l2])
+
+    out = l2.rpc.withdraw(bitcoind.rpc.getnewaddress(), 'all', '253perkw',
+                          utxos=['{}:{}'.format(utxo['txid'], utxo['output'])])
+    tx = bitcoind.rpc.getrawtransaction(out['txid'], True)
+    fee = bitcoind.rpc.getmempoolentry(out['txid'])['fees']['base']
+    assert fee * 10**8 * 1000 / tx['weight'] >= 250

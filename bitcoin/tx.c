@@ -935,8 +935,9 @@ size_t bitcoin_tx_input_witness_weight(enum utxotype utxotype)
 		 * to `1` and witness: <remote_sig>
 		 * Otherwise, this output is a simple P2WPKH to `remotepubkey`.
 		 */
-		/* In practice, these predate anchors, so: */
-		return 1 + 1 + bitcoin_tx_input_sig_weight();
+		/* Only the anchors form is P2WSH, so the witness is the sig
+		 * and that script: 37 bytes, or up to 39 with a lease's csv. */
+		return bitcoin_tx_input_sig_weight() + 1 + 39;
 	case UTXO_P2TR:
 		/* Unified Schnorr signatures include an explicit sighash byte. */
 		return 1 + 64 + !is_elements(chainparams);
