@@ -818,6 +818,10 @@ static void handle_splice_sending_sigs(struct lightningd *ld,
 			  "Splice signatures sent");
 
 	watch_splice_inflight(ld, inflight);
+
+	/* subd only writes this after the transaction commits */
+	subd_send_msg(channel->owner,
+		      take(towire_channeld_splice_sending_sigs_reply(NULL)));
 }
 
 static void scid_updated(struct channel *channel)
@@ -1737,6 +1741,7 @@ static unsigned channel_msg(struct subd *sd, const u8 *msg, const int *fds)
 	case WIRE_CHANNELD_DEV_MEMLEAK:
 	case WIRE_CHANNELD_DEV_QUIESCE:
 	case WIRE_CHANNELD_GOT_INFLIGHT:
+	case WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY:
 	case WIRE_CHANNELD_DEV_PEER_SHACHAIN:
 		/* Replies go to requests. */
 	case WIRE_CHANNELD_OFFER_HTLC_REPLY:

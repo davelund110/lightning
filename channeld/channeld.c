@@ -4167,8 +4167,10 @@ static void resume_splice_negotiation(struct peer *peer,
 						      inflight->i_sent_sigs);
 		wire_sync_write(MASTER_FD, take(msg));
 
-		msg = towire_channeld_splice_sending_sigs(tmpctx, &final_txid);
-		wire_sync_write(MASTER_FD, take(msg));
+		/* Only send once lightningd has stored i_sent_sigs */
+		msg = towire_channeld_splice_sending_sigs(NULL, &final_txid);
+		master_wait_sync_reply(tmpctx, peer, take(msg),
+				       WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY);
 
 		peer_write(peer->pps, sigmsg);
 	}
@@ -4363,8 +4365,10 @@ static void resume_splice_negotiation(struct peer *peer,
 	if (!do_i_send_tx_sigs_first(peer, current_psbt, our_role,
 				     inflight->force_sign_first)
 		&& send_signature) {
-		msg = towire_channeld_splice_sending_sigs(tmpctx, &final_txid);
-		wire_sync_write(MASTER_FD, take(msg));
+		/* Only send once lightningd has stored i_sent_sigs */
+		msg = towire_channeld_splice_sending_sigs(NULL, &final_txid);
+		master_wait_sync_reply(tmpctx, peer, take(msg),
+				       WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY);
 
 		peer_write(peer->pps, sigmsg);
 		status_debug("Splice: we signed second");
@@ -7129,6 +7133,7 @@ static void req_in(struct peer *peer, const u8 *msg)
 	case WIRE_CHANNELD_ADD_INFLIGHT:
 	case WIRE_CHANNELD_UPDATE_INFLIGHT:
 	case WIRE_CHANNELD_GOT_INFLIGHT:
+	case WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY:
 	case WIRE_CHANNELD_SPLICE_STATE_ERROR:
 	case WIRE_CHANNELD_LOCAL_ANCHOR_INFO:
 	case WIRE_CHANNELD_REESTABLISHED:
