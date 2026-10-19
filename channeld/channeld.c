@@ -1883,11 +1883,29 @@ static bool have_i_signed_inflight(const struct peer *peer,
 	return has_sig;
 }
 
+/* psbt_finalize moves both signatures on the shared input into its witness */
+static bool shared_input_finalized(const struct peer *peer,
+				   const struct inflight *inflight)
+{
+	u32 index;
+
+	if (!inflight || !inflight->psbt)
+		return false;
+
+	index = find_channel_funding_input(inflight->psbt,
+					   &peer->channel->funding);
+
+	return inflight->psbt->inputs[index].final_witness != NULL;
+}
+
 static bool have_they_signed_inflight(const struct peer *peer,
 				      const struct inflight *inflight)
 {
 	bool has_sig;
 	u32 index;
+
+	if (!inflight || !inflight->psbt)
+		return false;
 
 	index = find_channel_funding_input(inflight->psbt,
 					   &peer->channel->funding);
@@ -1978,12 +1996,18 @@ static void check_tx_abort(struct peer *peer, const u8 *msg, struct bitcoin_txid
 		 * A sending node:
 		 *   - MUST NOT have already transmitted `tx_signatures`
 		 */
-		/* As initiator we sign the splice we are negotiating before
-		 * sending anything, so for it i_sent_sigs decides. Any other
-		 * inflight, including this one after a reconnect, may predate
-		 * that field, so our signature on it counts as sent. */
+		/* As initiator we sign the shared input when the inflight is
+		 * created, before sending anything, so our signature alone
+		 * does not mean we sent it. An accepter only signs as it
+		 * sends tx_signatures. Once they have signed, the tx may be
+		 * complete elsewhere (older builds could clear i_sent_sigs,
+		 * and a multi-channel splice carries it to other peers), so
+		 * that also counts as sent. */
 		if (itr->i_sent_sigs
-		    || (!(peer->splicing && itr == last_inflight(peer))
+		    || itr->remote_tx_sigs
+		    || have_they_signed_inflight(peer, itr)
+		    || shared_input_finalized(peer, itr)
+		    || (!itr->i_am_initiator
 			&& have_i_signed_inflight(peer, itr))) {
 			peer_failed_err(peer->pps, &peer->channel_id, "tx_abort"
 				        " is not allowed after I have sent my"
@@ -4682,6 +4706,7 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 	new_inflight->force_sign_first = peer->splicing->force_sign_first;
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
+	new_inflight->remote_tx_sigs = false;
 
 	current_push_val = relative_splice_balance_fundee(peer, our_role,ictx->current_psbt,
 					  outpoint.n, splice_funding_index);
@@ -4985,6 +5010,7 @@ static void splice_initiator_user_finalized(struct peer *peer)
 	new_inflight->force_sign_first = peer->splicing->force_sign_first;
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
+	new_inflight->remote_tx_sigs = false;
 
 	audit_psbt(ictx->current_psbt, ictx->current_psbt);
 
