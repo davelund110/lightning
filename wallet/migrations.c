@@ -1120,6 +1120,25 @@ static const struct db_migration dbmigrations[] = {
      /* Clamping is idempotent, so no revert needed */
      NULL, NULL},
     {NULL, migrate_channel_type_unified_sigs_bit},
+    /* Until wallet_inflight_save wrote i_sent_sigs, it stayed 0 even once
+     * we had sent tx_signatures, so for a splice we initiated it cannot
+     * tell us whether the peer can complete the tx.
+     * Mark every such inflight as sent, on channels still in
+     * CHANNELD_NORMAL (3) or CHANNELD_AWAITING_SPLICE (13): numbers spelled
+     * out so the migration keeps doing what it did when it shipped.
+     *
+     * These releases already refused a peer's tx_abort for such an
+     * inflight, since we sign the shared input as initiator when the
+     * inflight is created, so this keeps that.  Accepter inflights are left
+     * alone, as an accepter's own signature on the shared input still
+     * counts as sent. */
+    {SQL("UPDATE channel_funding_inflights"
+	 " SET i_sent_sigs = 1"
+	 " WHERE i_am_initiator = 1"
+	 " AND channel_id IN (SELECT id FROM channels"
+	 "  WHERE state = 3 OR state = 13);"), NULL,
+     /* Only sets a flag older releases also read, so no revert needed */
+     NULL, NULL},
 };
 
 const struct db_migration *get_db_migrations(size_t *num)

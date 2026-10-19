@@ -96,7 +96,7 @@ def test_splice_stored_feerate_repaired_on_upgrade(node_factory, bitcoind,
     # They are plain idempotent UPDATEs, so re-running them is safe.  The
     # count has to reach back past both of them, so it grows whenever a
     # migration is appended after them.
-    l1.db_manip("UPDATE version SET version = version - 3")
+    l1.db_manip("UPDATE version SET version = version - 4")
     l1.daemon.opts['database-upgrade'] = 'true'
     l1.start()
 
