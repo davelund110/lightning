@@ -770,10 +770,11 @@ static const struct bitcoin_tx *onchain_signing_tx(const struct bitcoin_tx *tx,
 		/* Only needed until the caller serializes its HSM request. */
 		struct bitcoin_tx *copy = clone_bitcoin_tx(tmpctx, tx);
 		enum sighash_type base = SIGHASH_ALL;
+		/* Our half of an HTLC-success/timeout tx is SIGHASH_ALL too:
+		 * consider_onchain_htlc_tx_rebroadcast signs it again
+		 * whenever it adds fee inputs. */
 		if (channel_type_has_anchors(info->channel->type)
-		    && (info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_SUCCESS
-			|| info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_TIMEOUT
-			|| info->msgtype == WIRE_ONCHAIND_SPEND_FULFILL
+		    && (info->msgtype == WIRE_ONCHAIND_SPEND_FULFILL
 			|| info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_EXPIRED))
 			base = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY;
 		bitcoin_tx_require_unified(copy, 0, base);
@@ -1140,6 +1141,84 @@ static bool consider_onchain_rebroadcast(struct channel *channel,
 	return true;
 }
 
+/* BOLT #5:
+ * Otherwise, `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` MUST be used on the
+ * HTLC signatures received from the peer, as this allows HTLC transactions to be combined with
+ * other transactions.  The local signature MUST use `SIGHASH_ALL`, otherwise
+ * anyone can attach additional inputs and outputs to the tx.
+ */
+/* So on a unified channel our half of the HTLC input (always input 0) is
+ * signed again, last, over the transaction with its fee inputs and change. */
+static struct wally_psbt *sign_htlc_tx_mingle_unified(struct lightningd *ld,
+						      const struct channel *channel,
+						      const struct onchain_signing_info *info,
+						      const struct hsm_utxo **hsm_utxos,
+						      struct wally_psbt *psbt)
+{
+	const u8 *msg;
+	struct bitcoin_signature sig;
+	u64 commit_num;
+	u8 **witness;
+	struct wally_tx_witness_stack *stack;
+	bool ok;
+
+	/* Drop our old signature, and ask for the new one. */
+	if (wally_psbt_input_set_final_witness(&psbt->inputs[0], NULL) != WALLY_OK
+	    || wally_psbt_input_set_sighash(&psbt->inputs[0],
+					    SIGHASH_ALL | SIGHASH_UNIFIED) != WALLY_OK)
+		fatal("Cannot reopen HTLC input: %s",
+		      fmt_wally_psbt(tmpctx, psbt));
+
+	if (info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_SUCCESS) {
+		commit_num = info->u.htlc_success.commit_num;
+	} else {
+		assert(info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_TIMEOUT);
+		commit_num = info->u.htlc_timeout.commit_num;
+	}
+
+	msg = towire_hsmd_sign_htlc_tx_mingle_unified(NULL,
+						      &channel->peer->id,
+						      channel->dbid,
+						      hsm_utxos,
+						      psbt,
+						      commit_num,
+						      0,
+						      info->wscript);
+	msg = hsm_sync_req(tmpctx, ld, take(msg));
+	if (!fromwire_hsmd_sign_htlc_tx_mingle_unified_reply(tmpctx, msg,
+							     &psbt, &sig))
+		fatal("Reading sign_htlc_tx_mingle_unified_reply: %s",
+		      tal_hex(tmpctx, msg));
+	if (sig.sighash_type != (SIGHASH_ALL | SIGHASH_UNIFIED))
+		fatal("HSM signed our HTLC input with sighash 0x%x",
+		      sig.sighash_type);
+
+	if (info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_SUCCESS)
+		witness = bitcoin_witness_htlc_success_tx(tmpctx, &sig,
+							  &info->u.htlc_success.remote_htlc_sig,
+							  &info->u.htlc_success.preimage,
+							  info->wscript);
+	else
+		witness = bitcoin_witness_htlc_timeout_tx(tmpctx, &sig,
+							  &info->u.htlc_timeout.remote_htlc_sig,
+							  info->wscript);
+
+	tal_wally_start();
+	wally_tx_witness_stack_init_alloc(tal_count(witness), &stack);
+	for (size_t i = 0; i < tal_count(witness); i++)
+		wally_tx_witness_stack_add(stack, witness[i],
+					   tal_bytelen(witness[i]));
+	ok = (wally_psbt_input_set_final_witness(&psbt->inputs[0], stack)
+	      == WALLY_OK);
+	wally_tx_witness_stack_free(stack);
+	tal_wally_end(psbt);
+	if (!ok)
+		fatal("Cannot set HTLC input witness: %s",
+		      fmt_wally_psbt(tmpctx, psbt));
+
+	return psbt;
+}
+
 static bool consider_onchain_htlc_tx_rebroadcast(struct channel *channel,
 						 const struct bitcoin_tx **tx,
 						 struct onchain_signing_info *info)
@@ -1238,15 +1317,20 @@ static bool consider_onchain_htlc_tx_rebroadcast(struct channel *channel,
 
 	/* Now, get HSM to sign off. */
 	hsm_utxos = utxos_to_hsm_utxos(tmpctx, utxos);
-	msg = towire_hsmd_sign_htlc_tx_mingle(NULL,
-					      &channel->peer->id,
-					      channel->dbid,
-					      hsm_utxos,
-					      psbt);
-	msg = hsm_sync_req(tmpctx, ld, take(msg));
-	if (!fromwire_hsmd_sign_htlc_tx_mingle_reply(tmpctx, msg, &psbt))
-		fatal("Reading sign_htlc_tx_mingle_reply: %s",
-		      tal_hex(tmpctx, msg));
+	if (channel_type_has(channel->type, OPT_UNIFIED_SIGS)) {
+		psbt = sign_htlc_tx_mingle_unified(ld, channel, info,
+						   hsm_utxos, psbt);
+	} else {
+		msg = towire_hsmd_sign_htlc_tx_mingle(NULL,
+						      &channel->peer->id,
+						      channel->dbid,
+						      hsm_utxos,
+						      psbt);
+		msg = hsm_sync_req(tmpctx, ld, take(msg));
+		if (!fromwire_hsmd_sign_htlc_tx_mingle_reply(tmpctx, msg, &psbt))
+			fatal("Reading sign_htlc_tx_mingle_reply: %s",
+			      tal_hex(tmpctx, msg));
+	}
 
 	if (!psbt_finalize(psbt))
 		fatal("Non-final PSBT from hsm: %s",

@@ -1,5 +1,6 @@
 """Run only against isolated Knots regtest with Blake2b active from height 1."""
 from fixtures import *  # noqa: F401,F403
+from pyln.client import Millisatoshi
 from utils import only_one, wait_for, sync_blockheight, mine_funding_to_announce, TEST_NETWORK, TIMEOUT
 import queue
 import threading
@@ -10,19 +11,29 @@ import pytest
 pytestmark = pytest.mark.skipif(TEST_NETWORK != 'regtest', reason='Blake2b consensus tests require Knots regtest')
 
 
-def assert_unified_witnesses(bitcoind, txid, minimum):
+def is_signature(raw):
+    return len(raw) == 65 or (69 <= len(raw) <= 73 and raw[0] == 0x30)
+
+
+def assert_unified_witnesses(bitcoind, txid, minimum, anchors=True):
     tx = bitcoind.rpc.getrawtransaction(txid, True)
     signatures = []
-    for vin in tx['vin']:
-        for item in vin.get('txinwitness', []):
-            raw = bytes.fromhex(item)
-            if len(raw) == 65 or (69 <= len(raw) <= 73 and raw[0] == 0x30):
-                signatures.append(raw)
-    assert len(signatures) >= minimum
     # SIGHASH_UNIFIED is added to the hash type that would otherwise apply,
     # so SIGHASH_ALL becomes 0x21, and the anchors HTLC form 0xa3.
-    for sig in signatures:
-        assert sig[-1] in (0x21, 0xa3), '0x%02x' % sig[-1]
+    for vin in tx['vin']:
+        wit = [bytes.fromhex(item) for item in vin.get('txinwitness', [])]
+        # HTLC-timeout/success: <> <remotehtlcsig> <localhtlcsig> <> <wscript>.
+        # Only the half the peer pre-signed may be 0xa3: ours is always 0x21.
+        if len(wit) == 5 and wit[0] == b'' and is_signature(wit[1]) and is_signature(wit[2]):
+            assert wit[1][-1] == (0xa3 if anchors else 0x21), '0x%02x' % wit[1][-1]
+            assert wit[2][-1] == 0x21, '0x%02x' % wit[2][-1]
+            signatures += wit[1:3]
+            continue
+        for raw in wit:
+            if is_signature(raw):
+                assert raw[-1] in (0x21, 0xa3), '0x%02x' % raw[-1]
+                signatures.append(raw)
+    assert len(signatures) >= minimum
     return tx
 
 
@@ -387,3 +398,187 @@ def test_unified_their_unilateral_fulfill_to_us(node_factory, bitcoind):
     bitcoind.generate_block(100)
     sync_blockheight(bitcoind, [b])
     assert b.daemon.is_in_log('All outputs resolved')
+
+
+def split_wallet(node, bitcoind, n, sats):
+    """Leave node only n coins of sats each, so fees come from several."""
+    fundsats = sum(int(Millisatoshi(o['amount_msat']).to_satoshi())
+                   for o in node.rpc.listfunds()['outputs'] if o['status'] == 'confirmed')
+    psbt = node.rpc.fundpsbt("all", "1000perkw", 1000)['psbt']
+    psbt = node.rpc.addpsbtoutput(fundsats - n * sats - 5000, psbt,
+                                  destination=bitcoind.rpc.getnewaddress())['psbt']
+    for _ in range(n):
+        psbt = node.rpc.addpsbtoutput(sats, psbt)['psbt']
+    node.rpc.sendpsbt(node.rpc.signpsbt(psbt)['signed_psbt'])
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    sync_blockheight(bitcoind, [node])
+    wait_for(lambda: len([o for o in node.rpc.listfunds()['outputs']
+                          if o['status'] == 'confirmed' and o['amount_msat'] == sats * 1000]) == n)
+
+
+def mempool_spend(bitcoind, txid, witness_items=None):
+    """The mempool tx whose first input spends txid, if any."""
+    for t in bitcoind.rpc.getrawmempool():
+        tx = bitcoind.rpc.getrawtransaction(t, True)
+        vin0 = tx['vin'][0]
+        if vin0.get('txid') == txid and (witness_items is None
+                                         or len(vin0.get('txinwitness', [])) == witness_items):
+            return tx
+    return None
+
+
+def mempool_htlc_tx(bitcoind, commit):
+    return mempool_spend(bitcoind, commit, witness_items=5)
+
+
+def offer_stuck_htlc(l1, l2):
+    """l1 offers l2 an HTLC which l2 never resolves, then l2 goes away."""
+    inv = l2.rpc.invoice(10**8, 'stuck', 'desc')
+    l2.rpc.delinvoice('stuck', 'unpaid')
+    routestep = {'amount_msat': 10**8, 'id': l2.info['id'], 'delay': 12,
+                 'channel': only_one(l1.rpc.listpeerchannels()['channels'])['short_channel_id']}
+    l1.rpc.sendpay([routestep], inv['payment_hash'], payment_secret=inv['payment_secret'])
+    l2.daemon.wait_for_log('dev_disconnect')
+    l2.stop()
+
+
+def htlc_timeout_onchain(l1, bitcoind, funding):
+    """The HTLC hits its deadline: l1 goes on chain and times it out."""
+    bitcoind.generate_block(14)
+    wait_for(lambda: mempool_spend(bitcoind, funding) is not None)
+    commit = mempool_spend(bitcoind, funding)['txid']
+    bitcoind.generate_block(1, wait_for_mempool=commit)
+    l1.daemon.wait_for_log(' to ONCHAIN')
+    l1.wait_for_onchaind_tx('OUR_HTLC_TIMEOUT_TX', 'OUR_UNILATERAL/OUR_HTLC')
+    wait_for(lambda: mempool_htlc_tx(bitcoind, commit) is not None)
+    return commit
+
+
+def htlc_tx_onchain(node_factory, bitcoind, case):
+    """Leave our anchor channel's HTLC-timeout or HTLC-success tx, with
+    fee inputs from a wallet of small coins, in the mempool.  Returns the
+    node which broadcast it and the commitment tx it spends."""
+    opts = {'feerates': (3000,) * 4,
+            'min-emergency-msat': 546000,
+            'may_reconnect': True,
+            'broken_log': 'overgrind: short signature length'}
+    if case == 'timeout':
+        node, peer = node_factory.line_graph(2, opts=[opts,
+                                                      {'feerates': (3000,) * 4,
+                                                       'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
+        chan = only_one(node.rpc.listpeerchannels()['channels'])
+        split_wallet(node, bitcoind, 12, 5000)
+        offer_stuck_htlc(node, peer)
+        commit = htlc_timeout_onchain(node, bitcoind, chan['funding_txid'])
+    else:
+        # a -> node -> c, and node drops to chain after learning the preimage.
+        opts['disconnect'] = ['-WIRE_UPDATE_FULFILL_HTLC', 'permfail']
+        a, node, c = node_factory.get_nodes(3, opts=[{'may_reconnect': True}, opts,
+                                                     {'may_reconnect': True}])
+        node.rpc.connect(a.info['id'], 'localhost', a.port)
+        node.rpc.connect(c.info['id'], 'localhost', c.port)
+        node.fundwallet(10**7)
+        node.fundchannel(a, 10**6)
+        c_scid, _ = node.fundchannel(c, 10**6)
+        mine_funding_to_announce(bitcoind, [a, node, c])
+        a.wait_channel_active(c_scid)
+        chan = only_one(node.rpc.listpeerchannels(a.info['id'])['channels'])
+        split_wallet(node, bitcoind, 12, 5000)
+        node.pay(a, 2 * 10**8)
+        inv = c.rpc.invoice(10**8, 'success', 'desc')
+        route = a.single_route(c.info['id'], 10**8)
+        a.rpc.sendpay(route, inv['payment_hash'], payment_secret=inv['payment_secret'])
+        wait_for(lambda: mempool_spend(bitcoind, chan['funding_txid']) is not None)
+        commit = mempool_spend(bitcoind, chan['funding_txid'])['txid']
+        bitcoind.generate_block(1, wait_for_mempool=commit)
+        node.daemon.wait_for_log(' to ONCHAIN')
+        node.wait_for_onchaind_tx('OUR_HTLC_SUCCESS_TX', 'OUR_UNILATERAL/THEIR_HTLC')
+        wait_for(lambda: mempool_htlc_tx(bitcoind, commit) is not None)
+
+    names = chan['channel_type']['names']
+    assert 'unified_sigs/even' in names and 'anchors/even' in names
+    return node, commit
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.parametrize('case', ['timeout', 'success'])
+def test_unified_htlc_tx_rbf(node_factory, bitcoind, case):
+    """Every fee bump of our HTLC tx signs our half again, SIGHASH_ALL."""
+    node, commit = htlc_tx_onchain(node_factory, bitcoind, case)
+    # txid -> our signature, for each version seen in the mempool.
+    versions = {}
+
+    def check_current():
+        tx = mempool_htlc_tx(bitcoind, commit)
+        assert len(tx['vin']) > 1
+        wit = [bytes.fromhex(w) for w in tx['vin'][0]['txinwitness']]
+        assert wit[1][-1] == 0xa3, '0x%02x' % wit[1][-1]
+        assert wit[2][-1] == 0x21, '0x%02x' % wit[2][-1]
+        assert_unified_witnesses(bitcoind, tx['txid'], 2)
+        if tx['txid'] not in versions:
+            # SIGHASH_ALL: a different tx needs a different signature.
+            assert wit[2] not in versions.values()
+            versions[tx['txid']] = wit[2]
+        return tx['txid']
+
+    txid = check_current()
+    for rate in (6000, 10000):
+        node.set_feerates((rate,) * 4)
+        # An empty block makes it rebroadcast now, at the new feerate.
+        bitcoind.generate_block(1, needfeerate=10**9)
+        wait_for(lambda: (mempool_htlc_tx(bitcoind, commit) or {}).get('txid') not in (None, txid))
+        txid = check_current()
+
+        # Restarted, it builds and signs the tx afresh before sending it.
+        logpos = len(node.daemon.logs)
+        node.restart()
+        wait_for(lambda: node.daemon.is_in_log(r'RBF HTLC txid .* with txid', start=logpos))
+        wait_for(lambda: node.daemon.is_in_log(r'sendrawtx exit', start=logpos))
+        txid = check_current()
+
+    assert len(versions) >= 3, versions
+
+
+@pytest.mark.openchannel('v1')
+def test_htlc_tx_rbf_without_unified_sigs(node_factory, bitcoind):
+    """A channel without option_unified_sigs signs its HTLC txs as before, on
+    a node which offers it."""
+    no_unified = {'dev-force-features': '-514', 'may_reconnect': True, 'allow_warning': True}
+    l1, l2 = node_factory.line_graph(2, opts=[{**no_unified,
+                                               'feerates': (3000,) * 4,
+                                               'min-emergency-msat': 546000,
+                                               'broken_log': 'overgrind: short signature length'},
+                                              {**no_unified,
+                                               'feerates': (3000,) * 4,
+                                               'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
+    chan = only_one(l1.rpc.listpeerchannels()['channels'])
+    names = chan['channel_type']['names']
+    assert 'unified_sigs/even' not in names and 'anchors/even' in names
+
+    # Both upgrade.  The channel keeps the type it was opened with.
+    for n in (l1, l2):
+        del n.daemon.opts['dev-force-features']
+        n.restart()
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL')
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['channel_type']['names'] == names
+
+    split_wallet(l1, bitcoind, 12, 5000)
+    offer_stuck_htlc(l1, l2)
+    commit = htlc_timeout_onchain(l1, bitcoind, chan['funding_txid'])
+
+    def our_htlc_sigs():
+        tx = mempool_htlc_tx(bitcoind, commit)
+        assert len(tx['vin']) > 1
+        wit = [bytes.fromhex(w) for w in tx['vin'][0]['txinwitness']]
+        # SIGHASH_SINGLE|SIGHASH_ANYONECANPAY for both halves, no SIGHASH_UNIFIED.
+        assert wit[1][-1] == 0x83 and wit[2][-1] == 0x83, (wit[1][-1], wit[2][-1])
+        return tx['txid'], wit[2]
+
+    txid, sig = our_htlc_sigs()
+    l1.set_feerates((6000,) * 4)
+    bitcoind.generate_block(1, needfeerate=10**9)
+    wait_for(lambda: (mempool_htlc_tx(bitcoind, commit) or {}).get('txid') not in (None, txid))
+    # The fee bump left our signature alone: it was never over the fee inputs.
+    newtxid, newsig = our_htlc_sigs()
+    assert newtxid != txid and newsig == sig

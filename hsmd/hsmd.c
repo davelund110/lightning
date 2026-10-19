@@ -833,7 +833,8 @@ static struct io_plan *handle_client(struct io_conn *conn, struct client *c)
 	case WIRE_HSMD_SIGN_ANY_REMOTE_HTLC_TO_US:
 	case WIRE_HSMD_SIGN_ANY_LOCAL_HTLC_TX:
 	case WIRE_HSMD_SIGN_ANCHORSPEND:
-	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE: {
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE:
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED: {
 		u8 *reply = hsmd_handle_client_message(tmpctx, c->hsmd_client,
 						       c->msg_in);
 		if (!reply)
@@ -880,6 +881,7 @@ static struct io_plan *handle_client(struct io_conn *conn, struct client *c)
 	case WIRE_HSMD_CHECK_BIP86_PUBKEY_REPLY:
 	case WIRE_HSMD_SIGN_ANCHORSPEND_REPLY:
 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_REPLY:
+	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED_REPLY:
 	case WIRE_HSMD_SIGN_ANY_CANNOUNCEMENT_REPLY:
 		return bad_req_fmt(conn, c, c->msg_in,
 				   "Received an incoming message of type %s, "

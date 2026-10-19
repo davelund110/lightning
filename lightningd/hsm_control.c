@@ -186,6 +186,12 @@ struct ext_key *hsm_init(struct lightningd *ld)
 	}
 
 	if (feature_offered(ld->our_features->bits[INIT_FEATURE],
+			    OPT_UNIFIED_SIGS)
+	    && !hsm_capable(ld, WIRE_HSMD_SIGN_HTLC_TX_MINGLE_UNIFIED)) {
+		fatal("unified_sigs needs HSM capable of signing unified HTLC txs!");
+	}
+
+	if (feature_offered(ld->our_features->bits[INIT_FEATURE],
 			    OPT_SPLICE)
 	    && !hsm_capable(ld, WIRE_HSMD_SIGN_SPLICE_TX)) {
 		fatal("splicing needs HSM capable of signing splices!");

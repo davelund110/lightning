@@ -110,10 +110,64 @@ static void check_signing(void)
  assert(!check_tx_sig(tx, 0, NULL, code, &pub, &unified));
 }
 
+/* 0xa3 covers only the HTLC input and its output, wherever they sit in the
+ * tx; 0x21 covers every input and output. */
+static void check_htlc_tx_sighash(void)
+{
+ const enum sighash_type single = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY | SIGHASH_UNIFIED;
+ const enum sighash_type all = SIGHASH_ALL | SIGHASH_UNIFIED;
+ struct privkey key = { .secret.data = { 2 } };
+ struct pubkey pub;
+ struct bitcoin_outpoint htlc = { .n = 1 }, coin = { .n = 7 };
+ struct bitcoin_tx *txs[3];
+ struct sha256_double single_digest[3], all_digest[3];
+ struct bitcoin_signature sig;
+ /* The HTLC input's index in each of txs[] */
+ const size_t idx[3] = { 0, 0, 1 };
+ assert(pubkey_from_privkey(&key, &pub));
+ u8 *wscript = bitcoin_wscript_anchor(tmpctx, &pub);
+ u8 *coin_spk = scriptpubkey_p2wpkh(tmpctx, &pub);
+ memset(&htlc.txid, 1, sizeof(htlc.txid));
+ memset(&coin.txid, 2, sizeof(coin.txid));
+ for (size_t i = 0; i < 3; i++) {
+  txs[i] = bitcoin_tx(tmpctx, chainparams, 2, 2, 0);
+  if (i == 2) {
+   bitcoin_tx_add_input(txs[i], &coin, 0xfffffffd, NULL,
+                        amount_sat(20000), coin_spk, NULL);
+   bitcoin_tx_add_output(txs[i], coin_spk, NULL, amount_sat(15000));
+  }
+  bitcoin_tx_add_input(txs[i], &htlc, 1, NULL, amount_sat(50000), NULL, wscript);
+  bitcoin_tx_add_output(txs[i], scriptpubkey_p2wsh(tmpctx, wscript), NULL,
+                        amount_sat(50000));
+  if (i == 1) {
+   bitcoin_tx_add_input(txs[i], &coin, 0xfffffffd, NULL,
+                        amount_sat(20000), coin_spk, NULL);
+   bitcoin_tx_add_output(txs[i], coin_spk, NULL, amount_sat(15000));
+  }
+  bitcoin_tx_hash_for_sig(txs[i], idx[i], wscript, single, &single_digest[i]);
+  bitcoin_tx_hash_for_sig(txs[i], idx[i], wscript, all, &all_digest[i]);
+ }
+ for (size_t i = 1; i < 3; i++) {
+  assert(memcmp(&single_digest[0], &single_digest[i], sizeof(single_digest[0])) == 0);
+  assert(memcmp(&all_digest[0], &all_digest[i], sizeof(all_digest[0])) != 0);
+ }
+ assert(memcmp(&all_digest[1], &all_digest[2], sizeof(all_digest[1])) != 0);
+
+ /* So a signature on the bare tx carries over to the others only as 0xa3. */
+ sign_tx_input(txs[0], 0, NULL, wscript, &key, &pub, single, &sig);
+ for (size_t i = 0; i < 3; i++)
+  assert(check_tx_sig(txs[i], idx[i], NULL, wscript, &pub, &sig));
+ sign_tx_input(txs[0], 0, NULL, wscript, &key, &pub, all, &sig);
+ assert(check_tx_sig(txs[0], 0, NULL, wscript, &pub, &sig));
+ for (size_t i = 1; i < 3; i++)
+  assert(!check_tx_sig(txs[i], idx[i], NULL, wscript, &pub, &sig));
+}
+
 int main(int argc, char *argv[]) {
  common_setup(argv[0]);
  chainparams = chainparams_for_network("regtest");
  check_signing();
+ check_htlc_tx_sighash();
  check("2316de5a02a4fedc0d9e902f93a402329869afcf6b22c444f800297418b54d2e002c57eb6af3c4730b00569037965acac7bfd72758f60ddbe8ca7b1da23a70984f5e8b03bc44889190ea56034ec7bf259257003f9f66fc01cbbc461ea5ac04000254544e112901", "5353535353", 0, 163, 0, "4a84224afd272deeaa13972fb03ea70c738d78e50b53a63af3b3a9decfb548f5", 2, (u64[]){650374865900231ULL, 877685345816497ULL}, (const char *[]){"515151515151", "52525252525252"});
  check("74f713070329575216fe42fc7fb93e35ca2e52b3b12fee83f4d1aa8250be4445a6f912f33dd6b0974100a7b2d52e139daf3f073b5e3216427568954ad988564bcb34d053891a3ce8da53d815ada9fe8589a5003f14f14ff921522b5ecf9dbd392c2a386a620bfa03f0d6c6de57ac3e4a02e2bdd30d2b319e1d86cd0042937ea802affd6346928e0300035454540a1c474686220100065252525252525ec58fb5", "535353", 1, 161, 1, "0c049fe49dbe9a344f2ef8d3de920aa671e37a31919f106a6250c5635c7682e1", 3, (u64[]){217964177126525ULL, 1286402448270793ULL, 875002681445907ULL}, (const char *[]){"54545454545454", "53535353535353", "545454545454"});
  check("db27e51d021b2927dff1c4fa374ca66a750aa549f3a08db178978f57c663804273fc8dea29eb27f022008f680f8436a4c31084e27b4f296e24a932bb4121282c6962afc572f093d0c038a74ee843e462a72c0092a5b34701519c44e959aa040001561092b372", "515151", 0, 162, 1, "5ff71c408c490803bd6d0d5578685b565a3fb36a2adebadbea680ecf5ecdfd98", 2, (u64[]){1105898160581225ULL, 734602758275010ULL}, (const char *[]){"52525252", "5252525252525252"});
