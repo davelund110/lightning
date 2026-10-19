@@ -808,7 +808,7 @@ def test_script_two_chan_splice_v(node_factory, bitcoind):
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_script_two_chan_splice_x(node_factory, bitcoind):
     execute_script(node_factory, bitcoind, "* -> wallet; * -> {}; {} -> 200000",
-                   [500000 + 100000 + 1, 500000 - 200000], [-0.5, 0])  # (+1 to track rounded sat)
+                   [500000 + 100000, 500000 - 200000], [-0.5, 0])
 
 
 @pytest.mark.openchannel('v1')

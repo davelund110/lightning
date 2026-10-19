@@ -895,12 +895,13 @@ static size_t calc_weight(struct splice_cmd *splice_cmd,
 		lweight = weight;
 	}
 
-	/* Count the splice input manually */
+	/* Count the splice input manually, as channeld will when it checks
+	 * our fee (psbt_input_get_weight) */
 	for (size_t i = 0; i < tal_count(splice_cmd->actions); i++) {
 		action = splice_cmd->actions[i];
 		if (action->channel_id) {
 			weight += bitcoin_tx_input_weight(false,
-							  bitcoin_tx_2of2_input_witness_weight() - 1);
+							  bitcoin_tx_2of2_input_witness_weight());
 			plugin_log(plugin, LOG_DBG, " Simulating input"
 				   " (channel); weight:"
 				   " %zu", weight - lweight);
