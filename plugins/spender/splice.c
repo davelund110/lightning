@@ -172,6 +172,20 @@ static struct command_result *abort_get_result(struct command *cmd,
 	return send_outreq(req);
 }
 
+/* abort_channels refusing some or all channels doesn't stop us cleaning up
+ * and reporting why we failed in the first place. */
+static struct command_result *abort_get_error(struct command *cmd,
+					      const char *methodname,
+					      const char *buf,
+					      const jsmntok_t *error,
+					      struct abort_pkg *abort_pkg)
+{
+	plugin_log(cmd->plugin, LOG_UNUSUAL, "abort_channels failed: %.*s",
+		   json_tok_full_len(error), json_tok_full(buf, error));
+
+	return abort_get_result(cmd, methodname, buf, error, abort_pkg);
+}
+
 static struct command_result *do_fail(struct command *cmd,
 				      struct splice_cmd *splice_cmd,
 				      enum jsonrpc_errcode code,
@@ -194,7 +208,7 @@ static struct command_result *do_fail(struct command *cmd,
 	abort_pkg->code = code;
 
 	req = jsonrpc_request_start(cmd, "abort_channels",
-				    abort_get_result, forward_error, abort_pkg);
+				    abort_get_result, abort_get_error, abort_pkg);
 
 	added = 0;
 	json_array_start(req->js, "channel_ids");
@@ -1288,7 +1302,7 @@ static struct command_result *handle_wetrun(struct command *cmd,
 	abort_pkg->str = NULL;
 
 	req = jsonrpc_request_start(cmd, "abort_channels",
-				    abort_get_result, forward_error, abort_pkg);
+				    abort_get_result, abort_get_error, abort_pkg);
 
 	added = 0;
 	json_array_start(req->js, "channel_ids");

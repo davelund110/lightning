@@ -2059,7 +2059,8 @@ bool peer_start_channeld(struct channel *channel,
 				       cast_const2(const struct inflight **,
 						   inflights),
 				       *channel->alias[LOCAL],
-				       ld->dev_splice_abort_at_tx_complete);
+				       ld->dev_splice_abort_at_tx_complete,
+				       ld->dev_splice_warn_instead_of_sigs);
 
 	/* We don't expect a response: we are triggered by funding_depth_cb. */
 	subd_send_msg(channel->owner, take(initmsg));
@@ -2802,6 +2803,8 @@ static struct command_result *json_abort_channels(struct command *cmd,
 	struct channel *channel;
 	const jsmntok_t *channel_ids_tok, *channel_id_tok;
 	struct command_result *result;
+	struct json_stream *response;
+	char **refused;
 	size_t i;
 
 	if (!param_check(cmd, buffer, params,
@@ -2810,18 +2813,54 @@ static struct command_result *json_abort_channels(struct command *cmd,
 		return command_param_failed();
 
 	channels = tal_arr(cmd, struct channel*, 0);
+	refused = tal_arr(cmd, char *, 0);
 	json_for_each_arr(i, channel_id_tok, channel_ids_tok) {
+		struct channel_inflight *inflight;
+
 		result = param_channel_for_splice(cmd, NULL, buffer, channel_id_tok,
 						  &channel);
 		if (result)
 			return result;
+
+		/* BOLT #2:
+		 * A sending node:
+		 *   - MUST NOT have already transmitted `tx_signatures`
+		 */
+		inflight = channel_current_inflight(channel);
+		if (inflight && inflight->i_sent_sigs
+		    && !inflight->remote_tx_sigs
+		    && !cmd->ld->dev_splice_abort_after_sigs) {
+			tal_arr_expand(&refused,
+				       tal_fmt(refused,
+					       "Can't abort channel %s: we"
+					       " already sent tx_signatures for"
+					       " splice %s.  It completes when"
+					       " the peer sends theirs, which a"
+					       " reconnect asks for; if the peer"
+					       " never does, `close` the"
+					       " channel",
+					       fmt_channel_id(tmpctx,
+							      &channel->cid),
+					       fmt_bitcoin_txid(tmpctx,
+								&inflight->funding->outpoint.txid)));
+			continue;
+		}
 		tal_arr_expand(&channels, channel);
 	}
 
-	if (!tal_count(channels))
+	if (!tal_count(channels) && !tal_count(refused))
 		return command_fail_badparam(cmd, "channel_ids", buffer,
 					     channel_ids_tok,
 					     "Must specify a channel");
+
+	/* Nothing we can abort: say why */
+	if (!tal_count(channels)) {
+		/* tal_strjoin wants it NULL-terminated */
+		tal_arr_expand(&refused, NULL);
+		return command_fail(cmd, SPLICE_INVALID_CHANNEL_STATE, "%s",
+				    tal_strjoin(tmpctx, refused, "; ",
+						STR_NO_TRAIL));
+	}
 
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
@@ -2830,7 +2869,14 @@ static struct command_result *json_abort_channels(struct command *cmd,
 		subd_send_msg(channels[i]->owner,
 			      take(towire_channeld_abort(NULL)));
 
-	return command_success(cmd, json_stream_success(cmd));
+	response = json_stream_success(cmd);
+	if (tal_count(refused)) {
+		json_array_start(response, "refused");
+		for (i = 0; i < tal_count(refused); i++)
+			json_add_string(response, NULL, refused[i]);
+		json_array_end(response);
+	}
+	return command_success(cmd, response);
 }
 
 static const struct json_command splice_init_command = {

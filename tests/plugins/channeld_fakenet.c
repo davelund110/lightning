@@ -1084,6 +1084,7 @@ static struct channel *handle_init(struct info *info, const u8 *init_msg)
 	struct inflight **inflights;
 	struct short_channel_id local_alias;
 	bool dev_splice_abort_at_tx_complete;
+	bool dev_splice_warn_instead_of_sigs;
 	struct channel *channel;
 	const u8 *wscript;
 	char *err_reason;
@@ -1150,7 +1151,8 @@ static struct channel *handle_init(struct info *info, const u8 *init_msg)
 				    &pbases,
 				    &inflights,
 				    &local_alias,
-				    &dev_splice_abort_at_tx_complete))
+				    &dev_splice_abort_at_tx_complete,
+				    &dev_splice_warn_instead_of_sigs))
 		abort();
 
 	status_debug("Parsed init...");

@@ -1859,3 +1859,137 @@ def test_splice_rbf_feerate_too_low_peer_refuses(node_factory, bitcoind):
     l1.rpc.unreserveinputs(funds['psbt'])
 
     check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+def splice_we_signed_first(node, initiator, bitcoind):
+    """initiator splices in; node contributes nothing, so it signs first.
+    initiator (run with dev-splice-warn-instead-of-sigs) then sends a warning
+    instead of its tx_signatures, leaving node waiting for them."""
+    chan_id = initiator.get_channel_id(node)
+    initiator.fundwallet(500000, addrtype="p2tr")
+    funds = initiator.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = initiator.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    result = initiator.rpc.splice_update(chan_id, result['psbt'])
+    result = initiator.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    node.daemon.wait_for_logs([r'peer_out WIRE_TX_SIGNATURES',
+                               r'Splice: Awaiting signature message'])
+    result = initiator.rpc.signpsbt(result['psbt'])
+    txid = initiator.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+    node.daemon.wait_for_log(r'Received WARNING .*dev-splice-warn-instead-of-sigs')
+    return txid
+
+
+def wait_splice_resumed(node, peer):
+    """After a reconnect, node gets the peer's tx_signatures."""
+    wait_for(lambda: only_one(node.rpc.listpeerchannels(peer.info['id'])['channels'])['peer_connected'])
+    node.daemon.wait_for_logs([r'Splice negotation, will not send commit, not recv commit,'
+                               r' not send signature, recv signature as accepter',
+                               r'peer_in WIRE_TX_SIGNATURES'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_abort_after_we_signed_first(node_factory, bitcoind):
+    """Once we have sent tx_signatures we may not tx_abort: the user is told
+    so, and a reconnect resumes the signature exchange, after which the
+    splice can be aborted (a no-op) or replaced as usual."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'dev-splice-warn-instead-of-sigs': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    txid = splice_we_signed_first(l1, l2, bitcoind)
+
+    with pytest.raises(RpcError, match='we already sent tx_signatures.*`close` the channel'):
+        l1.rpc.abort_channels([chan_id])
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+
+    l1.rpc.disconnect(l2.info['id'], force=True)
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_splice_resumed(l1, l2)
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'resumed', 'resumed')['bolt11'])
+
+    # lightningd knows it has their signatures now, so this isn't refused.
+    assert 'refused' not in l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Abort requested with no splice in progress')
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    l2.daemon.wait_for_log(r'peer_out WIRE_TX_ACK_RBF')
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_abort_after_we_signed_first_channeld(node_factory, bitcoind):
+    """If an abort reaches channeld after we sent tx_signatures anyway, it
+    reconnects to resume the splice instead of failing the channel."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'dev-splice-abort-after-sigs': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'dev-splice-warn-instead-of-sigs': None,
+                                            'may_reconnect': True,
+                                            'allow_warning': True}])
+    txid = splice_we_signed_first(l1, l2, bitcoind)
+
+    l1.rpc.abort_channels([l1.get_channel_id(l2)])
+    l1.daemon.wait_for_log(r'Not aborting splice .*: we already sent tx_signatures,'
+                           r' reconnecting to resume it'
+                           r'|Peer permanent failure')
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    wait_splice_resumed(l1, l2)
+    wait_for(lambda: l1.db_query("SELECT funding_tx_remote_sigs_received AS r"
+                                 " FROM channel_funding_inflights;") == [{'r': 1}])
+
+    check_splice_survives(l1, l2, bitcoind, txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_abort_channels_refuses_one(node_factory, bitcoind):
+    """abort_channels skips (and reports) a channel it can't abort, and still
+    aborts the others: the splice plugin relies on that to clean up."""
+    l1, l2, l3 = node_factory.line_graph(3, fundamount=1000000, wait_for_announce=True,
+                                         opts=[{'dev-splice-warn-instead-of-sigs': None,
+                                                'may_reconnect': True,
+                                                'allow_warning': True},
+                                               {'may_reconnect': True,
+                                                'allow_warning': True},
+                                               {'may_reconnect': True,
+                                                'allow_warning': True}])
+    chan12 = l2.get_channel_id(l1)
+    chan23 = l2.get_channel_id(l3)
+    # Before chan12 gets stuck: a block would make l1 send splice_locked,
+    # which l2 can't take in STFU, so it would reconnect and resume.
+    l2.fundwallet(500000, addrtype="p2tr")
+    splice_we_signed_first(l2, l1, bitcoind)
+
+    l2.rpc.stfu_channels([chan23])
+    result = l2.rpc.abort_channels([chan12, chan23])
+    assert len(result['refused']) == 1
+    assert chan12 in result['refused'][0]
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL')
+    l3.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL')
+
+    # A splice script over both fails at stfu (chan12 is mid-splice): the
+    # plugin's cleanup aborts chan23 and still reports the stfu failure.
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
+    with pytest.raises(RpcError, match='stfu_channels'):
+        l2.rpc.splice('wallet -> 20000; 10000 -> {}; 10000 -> {}'.format(chan12, chan23))
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL')
+    assert not l2.daemon.is_in_log(r'abort_channels failed')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
+    l2.rpc.xpay(l3.rpc.invoice(10000, 'after', 'after')['bolt11'])

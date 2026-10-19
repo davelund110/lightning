@@ -183,6 +183,9 @@ struct peer {
 	/* Send tx_abort on every splice we accept, once it completes */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Signing second, send a warning instead of tx_signatures */
+	bool dev_splice_warn_instead_of_sigs;
+
 	/* Send a corrupted shared_input_signature */
 	bool dev_splice_corrupt_shared_sig;
 
@@ -4394,7 +4397,14 @@ static void resume_splice_negotiation(struct peer *peer,
 		master_wait_sync_reply(tmpctx, peer, take(msg),
 				       WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY);
 
-		peer_write(peer->pps, sigmsg);
+		/* Only within a negotiation: a reestablish resends them */
+		if (peer->dev_splice_warn_instead_of_sigs && peer->splicing)
+			peer_write(peer->pps,
+				   take(towire_warningfmt(NULL,
+							  &peer->channel_id,
+							  "dev-splice-warn-instead-of-sigs")));
+		else
+			peer_write(peer->pps, sigmsg);
 		status_debug("Splice: we signed second");
 	}
 
@@ -4407,6 +4417,16 @@ static void resume_splice_negotiation(struct peer *peer,
 		if (our_role == TX_INITIATOR)
 			calc_weight(TX_INITIATOR, current_psbt, true);
 
+		final_tx = bitcoin_tx_with_psbt(tmpctx, current_psbt);
+		msg = towire_channeld_splice_confirmed_signed(tmpctx, final_tx,
+							      new_output_index);
+		wire_sync_write(MASTER_FD, take(msg));
+	} else if (recv_signature && inflight->i_sent_sigs
+		   && have_i_signed_inflight(peer, inflight)
+		   && have_they_signed_inflight(peer, inflight)) {
+		/* Ours went out before (e.g. before a reconnect), so this
+		 * completes it: tell lightningd we have their signatures. */
+		inflight->remote_tx_sigs = true;
 		final_tx = bitcoin_tx_with_psbt(tmpctx, current_psbt);
 		msg = towire_channeld_splice_confirmed_signed(tmpctx, final_tx,
 							      new_output_index);
@@ -5477,6 +5497,19 @@ static void handle_abort_req(struct peer *peer, const u8 *inmsg)
 	if (peer->splicing) {
 		if (!peer->splicing->added_inflight)
 			inflight = NULL;
+		/* BOLT #2:
+		 * A sending node:
+		 *   - MUST NOT have already transmitted `tx_signatures`
+		 */
+		/* e.g. the peer sent a warning rather than its tx_signatures.
+		 * Reconnecting resumes the exchange, as aborting can't. */
+		else if (inflight->i_sent_sigs)
+			peer_failed_warn(peer->pps, &peer->channel_id,
+					 "Not aborting splice %s: we already"
+					 " sent tx_signatures, reconnecting to"
+					 " resume it",
+					 fmt_bitcoin_txid(tmpctx,
+							  &inflight->outpoint.txid));
 	} else if (inflight && (inflight->i_sent_sigs
 				|| have_i_signed_inflight(peer, inflight)))
 		inflight = NULL;
@@ -7301,7 +7334,8 @@ static void init_channel(struct peer *peer)
 				    &pbases,
 				    &peer->splice_state->inflights,
 				    &peer->local_alias,
-				    &peer->dev_splice_abort_at_tx_complete)) {
+				    &peer->dev_splice_abort_at_tx_complete,
+				    &peer->dev_splice_warn_instead_of_sigs)) {
 		master_badmsg(WIRE_CHANNELD_INIT, msg);
 	}
 
