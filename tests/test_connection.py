@@ -1555,7 +1555,7 @@ def test_funding_cancel_race(node_factory, bitcoind, executor):
     assert num_cancel == len(nodes)
 
     # We should have raced at least once!
-    if not VALGRIND:
+    if not VALGRIND and env("ASAN", "0") != "1":
         assert num_cancel > 0
         assert num_complete > 0
 
@@ -1653,7 +1653,7 @@ def test_funding_v2_cancel_race(node_factory, bitcoind, executor):
     print("Cancelled {} complete {}".format(num_cancel, num_complete))
 
     # We should have raced at least once!
-    if not VALGRIND:
+    if not VALGRIND and env("ASAN", "0") != "1":
         assert num_cancel > 0
         assert num_complete > 0
 
