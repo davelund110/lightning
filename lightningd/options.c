@@ -925,6 +925,10 @@ static void dev_register_opts(struct lightningd *ld)
 		     opt_set_bool,
 		     &ld->dev_splice_corrupt_input_witness,
 		     "Send splice tx_signatures first, with corrupted witnesses for our inputs");
+	clnopt_noarg("--dev-splice-exit-before-sending-sigs", OPT_DEV,
+		     opt_set_bool,
+		     &ld->dev_splice_exit_before_sending_sigs,
+		     "Exit after storing i_sent_sigs, before replying to channeld");
 	clnopt_noarg("--dev-splice-sign-second", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_splice_sign_second,

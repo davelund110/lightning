@@ -819,6 +819,12 @@ static void handle_splice_sending_sigs(struct lightningd *ld,
 
 	watch_splice_inflight(ld, inflight);
 
+	if (ld->dev_splice_exit_before_sending_sigs) {
+		log_unusual(channel->log, "dev-splice-exit-before-sending-sigs:"
+			    " exiting before replying to channeld");
+		exit(1);
+	}
+
 	/* subd only writes this after the transaction commits */
 	subd_send_msg(channel->owner,
 		      take(towire_channeld_splice_sending_sigs_reply(NULL)));
