@@ -1411,6 +1411,63 @@ def test_splice_tx_abort_refused_with_their_sigs(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_sent_sigs_marked_on_upgrade(node_factory, bitcoind, executor):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True,
+                                           'dev-no-reconnect': None})
+    chan_id = l1.get_channel_id(l2)
+
+    # l2 withholds its tx_signatures, so l1 holds no signature of l2's.
+    l2.stop()
+    l2.disconnect = ['-WIRE_TX_SIGNATURES']
+    l2.daemon.opts['dev-disconnect'] = os.path.join(l2.daemon.lightning_dir,
+                                                    TEST_NETWORK, 'dev-disconnect')
+    l2.start()
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+
+    funds_result = l1.rpc.addpsbtoutput(100000)
+    result = l1.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    executor.submit(l1.rpc.splice_update, chan_id, result['psbt'])
+    l2.daemon.wait_for_log(r'dev_disconnect: -WIRE_TX_SIGNATURES')
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights"
+                                 " WHERE last_tx IS NOT NULL;")[0]['c'] == 1)
+    l1.stop()
+    l2.stop()
+
+    # An older release that had sent our tx_signatures here stored the same
+    # row, with i_sent_sigs still 0.  Rewind so the upgrade marks it.
+    row = only_one(l1.db_query("SELECT i_am_initiator, i_sent_sigs"
+                               " FROM channel_funding_inflights;"))
+    assert row['i_am_initiator'] == 1 and row['i_sent_sigs'] == 0
+    l1.db_manip("UPDATE version SET version = version - 1")
+    l1.daemon.opts['database-upgrade'] = 'true'
+
+    # l2 forgets the splice, so it answers l1's next_funding with tx_abort.
+    l2.db_manip("DELETE FROM htlc_sigs WHERE inflight_tx_id IS NOT NULL")
+    l2.db_manip("DELETE FROM channel_funding_inflights")
+    l2.db_manip("UPDATE channels SET state=3 WHERE state=13")
+    del l2.daemon.opts['dev-disconnect']
+    l2.start()
+    l1.start()
+    assert l1.daemon.is_in_log(r'Updating database from version')
+    assert only_one(l1.db_query("SELECT i_sent_sigs"
+                                " FROM channel_funding_inflights;"))['i_sent_sigs'] == 1
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'tx_abort is not allowed after I have sent my signature'
+                           r'|Restarting channeld after tx_abort')
+    assert l1.daemon.is_in_log(r'tx_abort is not allowed after I have sent my signature')
+    assert only_one(l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;"))['c'] == 1
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.parametrize("l1_initiates", [True, False])
 def test_splice_sigs_sent_after_commit(node_factory, bitcoind, executor, l1_initiates):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
