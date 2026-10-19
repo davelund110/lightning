@@ -1244,6 +1244,7 @@ def test_splice_unconfirmed_force_close_publishes_current(node_factory, bitcoind
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
 def test_splice_force_close_uses_splice_remote_fundingkey(node_factory, bitcoind):
     """A force close must sign a splice commitment with the splice's funding key.
 

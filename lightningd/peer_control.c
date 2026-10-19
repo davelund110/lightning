@@ -544,7 +544,7 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 			}
 			const u8 *funding_wscript = bitcoin_redeem_2of2(tmpctx,
 									&channel->local_funding_pubkey,
-									inflight->funding->splice_remote_funding);
+									inflight_remote_fundingkey(channel, inflight));
 			watch_scriptpubkey(inflight, ld->topology,
 					   take(scriptpubkey_p2wsh(NULL, funding_wscript)),
 					   &inflight->funding->outpoint,

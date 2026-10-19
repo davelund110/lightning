@@ -4468,3 +4468,36 @@ def test_v2_rbf_psbt_version_0(node_factory, bitcoind):
         n.daemon.wait_for_log(' to CHANNELD_NORMAL')
     # The bump is what confirmed.
     assert only_one(l1.rpc.listpeerchannels()['channels'])['funding_txid'] != res['txid']
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.openchannel('v2')
+def test_rbf_mutual_close_before_lockin(node_factory, bitcoind):
+    """A mutual close of a dual-funded channel with an RBF candidate
+    pending watches every candidate's output."""
+    l1, l2 = node_factory.get_nodes(2)
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    chan_amount = 100000
+    l1.fundwallet(2**24)
+
+    res = l1.rpc.fundchannel(l2.info['id'], chan_amount)
+    chan_id = res['channel_id']
+    vin = only_one(bitcoind.rpc.decoderawtransaction(res['tx'])['vin'])
+    l1.daemon.wait_for_log(' to DUALOPEND_AWAITING_LOCKIN')
+
+    initpsbt = l1.rpc.utxopsbt(chan_amount, find_next_feerate(l1, l2), 42 + 172,
+                               ["{}:{}".format(vin['txid'], vin['vout'])],
+                               reservedok=True, excess_as_change=True)['psbt']
+    bump = l1.rpc.openchannel_bump(chan_id, chan_amount, initpsbt)
+    update = l1.rpc.openchannel_update(chan_id, bump['psbt'])
+    assert update['commitments_secured']
+    l1.rpc.openchannel_signed(chan_id, l1.rpc.signpsbt(update['psbt'])['signed_psbt'])
+    wait_for(lambda: len(only_one(l1.rpc.listpeerchannels()['channels'])['inflight']) == 2)
+
+    l1.rpc.close(chan_id)
+    for n in (l1, l2):
+        wait_for(lambda: only_one(n.rpc.listpeerchannels()['channels'])['state'] == 'CLOSINGD_COMPLETE')
+
+    # Startup resends the close, which takes the same path.
+    l2.restart()
+    assert only_one(l2.rpc.listpeerchannels()['channels'])['state'] == 'CLOSINGD_COMPLETE'
