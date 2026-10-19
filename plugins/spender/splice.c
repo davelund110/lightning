@@ -1,4 +1,5 @@
 #include "config.h"
+#include <bitcoin/feerate.h>
 #include <bitcoin/psbt.h>
 #include <bitcoin/script.h>
 #include <ccan/array_size/array_size.h>
@@ -802,6 +803,15 @@ static struct command_result *feerate_get_result(struct command *cmd,
 	if (!json_to_u32(buf, tok, &splice_cmd->feerate_per_kw))
 		return command_fail_badparam(cmd, "opening", buf,
 					     tok, "invalid u32");
+
+	if (splice_cmd->feerate_per_kw < splice_cmd->rbf_min_feerate_per_kw) {
+		plugin_log(cmd->plugin, LOG_INFORM,
+			   "Raising feerate from %"PRIu32" to %"PRIu32" perkw"
+			   " to replace a pending splice",
+			   splice_cmd->feerate_per_kw,
+			   splice_cmd->rbf_min_feerate_per_kw);
+		splice_cmd->feerate_per_kw = splice_cmd->rbf_min_feerate_per_kw;
+	}
 
 	if (!splice_cmd->feerate_per_kw)
 		return command_fail(splice_cmd->cmd,
@@ -2082,6 +2092,7 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 {
 	struct splice_script_error *error;
 	struct splice_script_chan **channels;
+	u32 *rbf_min_feerates;
 	struct command_result *result;
 	const jsmntok_t *jchannels, *jchannel;
 	char **lines;
@@ -2091,10 +2102,14 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 	const char *err;
 
 	channels = tal_arr(tmpctx, struct splice_script_chan*, 0);
+	rbf_min_feerates = tal_arr(tmpctx, u32, 0);
 	jchannels = json_get_member(buf, toks, "channels");
 	json_for_each_arr(i, jchannel, jchannels) {
+		const jsmntok_t *jinflights;
+
 		tal_arr_expand(&channels, tal(channels,
 					      struct splice_script_chan));
+		tal_arr_expand(&rbf_min_feerates, 0);
 
 		err = json_scan(tmpctx, buf, jchannel,
 				"{peer_id?:%,channel_id?:%}",
@@ -2105,6 +2120,38 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 		if (err)
 			errx(1, "Bad listpeerchannels.channels %zu: %s",
 			     i, err);
+
+		/* A splice on this channel will replace its last inflight */
+		jinflights = json_get_member(buf, jchannel, "inflight");
+		if (jinflights && jinflights->size) {
+			const jsmntok_t *jfeerate;
+			jsmntok_t base;
+			u32 last_feerate;
+
+			jfeerate = json_get_member(buf,
+						   json_get_arr(jinflights,
+								jinflights->size - 1),
+						   "feerate");
+			if (!jfeerate
+			    || !json_tok_endswith(buf, jfeerate, "perkw"))
+				errx(1, "Bad listpeerchannels.channels %zu:"
+				     " inflight feerate", i);
+			base = *jfeerate;
+			base.end -= strlen("perkw");
+			if (!json_to_u32(buf, &base, &last_feerate))
+				errx(1, "Bad listpeerchannels.channels %zu:"
+				     " inflight feerate", i);
+			if (!next_funding_feerate(last_feerate,
+						  &rbf_min_feerates[i]))
+				return command_fail(cmd,
+						    JSONRPC2_INVALID_PARAMS,
+						    "Can't calculate the next"
+						    " feerate: the last splice"
+						    " feerate recorded for"
+						    " channel %zu (%"PRIu32")"
+						    " is out of range",
+						    i, last_feerate);
+		}
 	}
 
 	if (splice_cmd->script) {
@@ -2141,6 +2188,20 @@ static struct command_result *listpeerchannels_get_result(struct command *cmd,
 	}
 
 	assert(splice_cmd->actions);
+
+	for (i = 0; i < tal_count(splice_cmd->actions); i++) {
+		const struct channel_id *chan_id;
+
+		chan_id = splice_cmd->actions[i]->channel_id;
+		if (!chan_id)
+			continue;
+		for (size_t j = 0; j < tal_count(channels); j++)
+			if (channel_id_eq(chan_id, &channels[j]->chan_id)
+			    && rbf_min_feerates[j]
+			       > splice_cmd->rbf_min_feerate_per_kw)
+				splice_cmd->rbf_min_feerate_per_kw
+					= rbf_min_feerates[j];
+	}
 
 	result = validate_splice_cmd(splice_cmd);
 	if (result)
@@ -2186,6 +2247,7 @@ json_splice(struct command *cmd, const char *buf, const jsmntok_t *params)
 	splice_cmd->dryrun = *dryrun;
 	splice_cmd->wetrun = *wetrun;
 	splice_cmd->feerate_per_kw = 0;
+	splice_cmd->rbf_min_feerate_per_kw = 0;
 	splice_cmd->force_feerate = *force_feerate;
 	splice_cmd->wallet_inputs_to_signed = 0;
 	splice_cmd->fee_calculated = false;
@@ -2247,6 +2309,7 @@ json_splicein(struct command *cmd, const char *buf, const jsmntok_t *params)
 	splice_cmd->dryrun = false;
 	splice_cmd->wetrun = false;
 	splice_cmd->feerate_per_kw = 0;
+	splice_cmd->rbf_min_feerate_per_kw = 0;
 	splice_cmd->force_feerate = false;
 	splice_cmd->wallet_inputs_to_signed = 0;
 	splice_cmd->fee_calculated = false;
@@ -2297,6 +2360,7 @@ json_spliceout(struct command *cmd, const char *buf, const jsmntok_t *params)
 	splice_cmd->dryrun = false;
 	splice_cmd->wetrun = false;
 	splice_cmd->feerate_per_kw = 0;
+	splice_cmd->rbf_min_feerate_per_kw = 0;
 	splice_cmd->force_feerate = *force_feerate;
 	splice_cmd->wallet_inputs_to_signed = 0;
 	splice_cmd->fee_calculated = false;

@@ -2447,7 +2447,7 @@ static struct command_result *json_splice_init(struct command *cmd,
 	struct wally_psbt *initialpsbt;
 	s64 *relative_amount;
 	u32 *feerate_per_kw;
-	bool *force_feerate, *skip_stfu;
+	bool *force_feerate, *skip_stfu, explicit_feerate = false;
 	u8 *msg;
 
 	if (!param_check(cmd, buffer, params,
@@ -2484,6 +2484,40 @@ static struct command_result *json_splice_init(struct command *cmd,
 	if (!feerate_per_kw) {
 		feerate_per_kw = tal(cmd, u32);
 		*feerate_per_kw = splice_feerate(cmd->ld->topology, cmd->ld);
+	} else
+		explicit_feerate = true;
+
+	/* BOLT #2:
+	 * The sender:
+	 *   - MUST set `feerate` greater than or equal to 25/24 times the
+	 *     `feerate` of the previously constructed transaction, rounded
+	 *     down.
+	 */
+	if (channel_current_inflight(channel)) {
+		u32 last_feerate = channel_last_funding_feerate(channel);
+		u32 next_feerate_min;
+
+		if (!next_funding_feerate(last_feerate, &next_feerate_min))
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Can't calculate the next feerate:"
+					    " the last splice feerate recorded"
+					    " for this channel (%u) is out of"
+					    " range",
+					    last_feerate);
+		if (*feerate_per_kw < next_feerate_min) {
+			if (explicit_feerate)
+				return command_fail(cmd,
+						    JSONRPC2_INVALID_PARAMS,
+						    "This replaces a pending"
+						    " splice, so the feerate"
+						    " must be at least %u perkw"
+						    " (25/24 of the last, %u):"
+						    " you proposed %u",
+						    next_feerate_min,
+						    last_feerate,
+						    *feerate_per_kw);
+			*feerate_per_kw = next_feerate_min;
+		}
 	}
 
 	if (!initialpsbt)

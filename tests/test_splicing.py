@@ -1649,9 +1649,18 @@ def test_splice_peer_coinbase_input_aborted(node_factory, bitcoind):
     l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
 
 
+def splice_feerate_of(node, txid):
+    inflight = only_one([i for i in only_one(node.rpc.listpeerchannels()['channels'])['inflight']
+                         if i['funding_txid'] == txid])
+    assert inflight['feerate'].endswith('perkw')
+    return int(inflight['feerate'][:-len('perkw')])
+
+
 def peer_splices_in(peer, node, chan_id, bitcoind):
     """peer splices in 100k sats: signed by both sides and in the mempool."""
-    peer.fundwallet(500000)
+    # p2tr, like node's wallet: an RBF that is no lighter can then clear
+    # bitcoind's absolute fee bump at 25/24 of the feerate.
+    peer.fundwallet(500000, addrtype="p2tr")
     txid = peer.rpc.splicein(chan_id, "100000")['txid']
     peer.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
     node.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
@@ -1740,3 +1749,85 @@ def test_splicein_feerate_units(node_factory, bitcoind):
         inflight = only_one(only_one(n.rpc.listpeerchannels()['channels'])['inflight'])
         assert inflight['funding_txid'] == txid
         assert inflight['feerate'] == '{}perkw'.format(feerate)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_script_rbf_feerate_too_low(node_factory, bitcoind):
+    """A script feerate too low to replace the pending splice is refused
+    after the plugin has quiesced the channel: its abort only leaves STFU."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l1, splice_txid)
+
+    with pytest.raises(RpcError, match='at least {}'.format(last_feerate * 25 // 24)):
+        l1.rpc.splice('wallet -> 50000 + fee@{}; 50000 -> {}'.format(last_feerate, chan_id))
+    l1.daemon.wait_for_log(r'We are initiating tx_abort for reason: requested by user'
+                           r'|Peer permanent failure')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splicein_rbf_feerate(node_factory, bitcoind):
+    """splicein on top of the peer's pending splice bids a valid RBF feerate."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True)
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l1, splice_txid)
+
+    rbf_txid = l1.rpc.splicein(chan_id, "50000")['txid']
+
+    # At least 25/24 of the previous feerate, rounded down.
+    for n in (l1, l2):
+        assert splice_feerate_of(n, rbf_txid) >= last_feerate * 25 // 24
+    wait_for(lambda: bitcoind.rpc.getrawmempool() == [rbf_txid])
+
+    bitcoind.generate_block(6, wait_for_mempool=rbf_txid)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    for n in (l1, l2):
+        assert only_one(n.rpc.listpeerchannels()['channels'])['funding_txid'] == rbf_txid
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_rbf_feerate_too_low(node_factory, bitcoind):
+    """An RBF below 25/24 of the last splice feerate is refused before we
+    contact the peer; without a feerate we pick one that qualifies."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    splice_txid = peer_splices_in(l2, l1, chan_id, bitcoind)
+    last_feerate = splice_feerate_of(l1, splice_txid)
+    min_feerate = last_feerate * 25 // 24
+
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    l2.daemon.logs_catchup()
+    start = len(l2.daemon.logs)
+    with pytest.raises(RpcError, match='at least {}'.format(min_feerate)):
+        # A bare number is perkb.
+        l1.rpc.splice_init(chan_id, 100000, funds['psbt'],
+                           feerate_per_kw=(min_feerate - 1) * 4)
+    assert not l2.daemon.is_in_log(r'peer_in WIRE_(STFU|TX_INIT_RBF)', start=start)
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_AWAITING_SPLICE'
+
+    l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    l1.daemon.wait_for_log(r'splice_init input PSBT version [0-9]+, feerate: {}'.format(min_feerate))
+    l2.daemon.wait_for_log(r'peer_in WIRE_TX_INIT_RBF')
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)
