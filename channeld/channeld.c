@@ -4449,7 +4449,7 @@ static void update_hsmd_with_splice(struct peer *peer, struct inflight *inflight
 		/*local_upfront_shutdown_script*/ NULL,
 		/*local_upfront_shutdown_wallet_index*/ NULL,
 		&peer->channel->basepoints[REMOTE],
-		&peer->channel->funding_pubkey[REMOTE],
+		&inflight->remote_funding,
 		peer->channel->config[REMOTE].to_self_delay,
 		/*remote_upfront_shutdown_script*/ NULL,
 		peer->channel->type);
