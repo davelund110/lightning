@@ -1052,6 +1052,7 @@ static void handle_update_inflight(struct lightningd *ld,
 	if (last_sig)
 		inflight->last_sig = *last_sig;
 
+	tal_free(inflight->locked_scid);
 	inflight->locked_scid = tal_steal(inflight, locked_scid);
 	if (inflight->i_sent_sigs && !i_sent_sigs)
 		log_broken(channel->log, "channeld tried to clear i_sent_sigs");

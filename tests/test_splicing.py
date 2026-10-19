@@ -1,5 +1,6 @@
 from fixtures import *  # noqa: F401,F403
 from pyln.client import RpcError
+from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND
 import os
 import pytest
 import threading
@@ -2104,3 +2105,66 @@ def test_splice_rbf_feerate_above_our_max(node_factory, bitcoind):
     l1.rpc.unreserveinputs(funds['psbt'])
 
     check_splice_survives(l1, l2, bitcoind, splice_txid)
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_locks_while_peer_awaits_sigs(node_factory, bitcoind):
+    """l1's splice confirms while l2 still waits for l1's tx_signatures:
+    l2 can't take splice_locked then, so they reconnect, l1 resends its
+    signatures, updating the inflight it has already locked, and the splice
+    completes."""
+    disconnect = ['$WIRE_TX_SIGNATURES']
+    # A dual-funded open sends tx_signatures too.
+    if EXPERIMENTAL_DUAL_FUND:
+        disconnect = ['=WIRE_TX_SIGNATURES'] + disconnect
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'disconnect': disconnect,
+                                            'may_reconnect': True,
+                                            'allow_warning': True},
+                                           {'may_reconnect': True,
+                                            'allow_warning': True}])
+    chan_id = l1.get_channel_id(l2)
+    l1.fundwallet(500000, addrtype="p2tr")
+
+    # l2 contributes nothing, so signs first; l1's tx_signatures are dropped,
+    # leaving l2 waiting for them (too busy to see the splice confirm).
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    l2.daemon.wait_for_logs([r'peer_out WIRE_TX_SIGNATURES',
+                             r'Splice: Awaiting signature message'])
+    result = l1.rpc.signpsbt(result['psbt'])
+    txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+
+    bitcoind.generate_block(1, wait_for_mempool=txid)
+    l1.daemon.wait_for_log(r'peer_out WIRE_SPLICE_LOCKED')
+    l2.daemon.wait_for_log(r'Splicing got incorrect message from peer: WIRE_SPLICE_LOCKED')
+
+    # Don't wait for the reconnect backoff.
+    def connected():
+        if only_one(l2.rpc.listpeerchannels(l1.info['id'])['channels'])['peer_connected']:
+            return True
+        try:
+            l2.rpc.connect(l1.info['id'], 'localhost', l1.port)
+        except RpcError:
+            pass
+        return False
+    wait_for(connected)
+    l2.daemon.wait_for_logs([r'Splice negotation, will not send commit, not recv commit,'
+                             r' not send signature, recv signature as accepter',
+                             r'peer_in WIRE_TX_SIGNATURES'])
+    for n in (l1, l2):
+        assert n.rpc.dev_memleak()['leaks'] == []
+
+    bitcoind.generate_block(5)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    for n in (l1, l2):
+        assert only_one(n.rpc.listpeerchannels()['channels'])['funding_txid'] == txid
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after', 'after')['bolt11'])
