@@ -2066,3 +2066,41 @@ def test_splice_init_refused_leaves_no_splice(node_factory, bitcoind):
     l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
     l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
     assert not l1.daemon.is_in_log('Peer permanent failure')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_rbf_feerate_above_our_max(node_factory, bitcoind):
+    """When 25/24 of the pending splice's feerate is more than we'll pay,
+    splice_init (and its check) says so before contacting the peer."""
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+    l2.fundwallet(500000, addrtype="p2tr")
+    splice_txid = l2.rpc.splice('wallet -> 100000 + fee@100000; 100000 -> {}'.format(chan_id),
+                                force_feerate=True)['txid']
+    l1.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    wait_for(lambda: splice_txid in bitcoind.rpc.getrawmempool())
+    assert splice_feerate_of(l1, splice_txid) == 100000
+
+    l2.daemon.logs_catchup()
+    start = len(l2.daemon.logs)
+    with pytest.raises(RpcError, match='Replacing the pending splice needs a feerate of at least 104166'):
+        l1.rpc.check(command_to_check='splice_init', channel_id=chan_id, relative_amount=100000)
+    funds = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    with pytest.raises(RpcError, match='Replacing the pending splice needs a feerate of at least 104166'):
+        l1.rpc.splice_init(chan_id, 100000, funds['psbt'])
+    assert not l2.daemon.is_in_log(r'peer_in WIRE_(STFU|TX_INIT_RBF)', start=start)
+
+    l1.rpc.call('splice_init', {'channel_id': chan_id, 'relative_amount': 100000,
+                                'initialpsbt': funds['psbt'], 'force_feerate': True})
+    l1.daemon.wait_for_log(r'splice_init input PSBT version [0-9]+, feerate: 104166')
+    l2.daemon.wait_for_log(r'peer_out WIRE_TX_ACK_RBF')
+    l1.rpc.abort_channels([chan_id])
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_AWAITING_SPLICE')
+    l1.rpc.unreserveinputs(funds['psbt'])
+
+    check_splice_survives(l1, l2, bitcoind, splice_txid)

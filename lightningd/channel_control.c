@@ -2482,9 +2482,6 @@ static struct command_result *json_splice_init(struct command *cmd,
 				    " close it and open a new one instead of"
 				    " splicing");
 
-	if (command_check_only(cmd))
-		return command_check_done(cmd);
-
 	if (!feerate_per_kw) {
 		feerate_per_kw = tal(cmd, u32);
 		*feerate_per_kw = splice_feerate(cmd->ld->topology, cmd->ld);
@@ -2509,6 +2506,20 @@ static struct command_result *json_splice_init(struct command *cmd,
 					    " for this channel (%u) is out of"
 					    " range",
 					    last_feerate);
+		/* As channeld would refuse it, but say why */
+		if (!*force_feerate
+		    && !channel->ignore_fee_limits
+		    && !cmd->ld->config.ignore_fee_limits
+		    && !cmd->ld->dev_splice_rbf_any_feerate
+		    && next_feerate_min > our_feerate_max(cmd->ld, NULL))
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Replacing the pending splice needs"
+					    " a feerate of at least %u perkw"
+					    " (25/24 of the last, %u), more"
+					    " than we'll pay (%u): set"
+					    " force_feerate to pay it anyway",
+					    next_feerate_min, last_feerate,
+					    our_feerate_max(cmd->ld, NULL));
 		if (*feerate_per_kw < next_feerate_min
 		    && !cmd->ld->dev_splice_rbf_any_feerate) {
 			if (explicit_feerate)
@@ -2525,6 +2536,9 @@ static struct command_result *json_splice_init(struct command *cmd,
 			*feerate_per_kw = next_feerate_min;
 		}
 	}
+
+	if (command_check_only(cmd))
+		return command_check_done(cmd);
 
 	if (!initialpsbt)
 		initialpsbt = create_psbt(cmd, 0, 0, 0);
