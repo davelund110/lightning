@@ -383,6 +383,10 @@ struct lightningd {
 	 * check can be tested. */
 	bool dev_splice_corrupt_input_witness;
 
+	/* Exit while handling splice_sending_sigs, after i_sent_sigs is
+	 * stored but before replying to channeld. */
+	bool dev_splice_exit_before_sending_sigs;
+
 	/* Never send splice tx_signatures first, so the checks we make
 	 * before signing can be tested. */
 	bool dev_splice_sign_second;

@@ -350,16 +350,24 @@ static void handle_splice_abort(struct lightningd *ld,
 		inflight = list_tail(&channel->inflights,
 				     struct channel_inflight,
 				     list);
-
-		if (!bitcoin_outpoint_eq(outpoint,
-					 &inflight->funding->outpoint))
+		if (!inflight
+		    || !bitcoin_outpoint_eq(outpoint,
+					    &inflight->funding->outpoint)) {
+			cc = splice_command_for_chan(ld, channel);
+			if (cc)
+				was_pending(command_fail(cc->cmd, SPLICE_ABORT,
+							 "%s", reason));
 			channel_internal_error(channel,
 					       "abort outpoint %s does not"
 					       " match ours %s",
 					       fmt_bitcoin_outpoint(tmpctx,
 								    outpoint),
-					       fmt_bitcoin_outpoint(tmpctx,
-								    &inflight->funding->outpoint));
+					       inflight
+					       ? fmt_bitcoin_outpoint(tmpctx,
+								      &inflight->funding->outpoint)
+					       : "(none)");
+			return;
+		}
 
 		wallet_inflight_del(ld->wallet, channel, inflight);
 		tal_free(inflight);
@@ -818,6 +826,16 @@ static void handle_splice_sending_sigs(struct lightningd *ld,
 			  "Splice signatures sent");
 
 	watch_splice_inflight(ld, inflight);
+
+	if (ld->dev_splice_exit_before_sending_sigs) {
+		log_unusual(channel->log, "dev-splice-exit-before-sending-sigs:"
+			    " exiting before replying to channeld");
+		exit(1);
+	}
+
+	/* subd only writes this after the transaction commits */
+	subd_send_msg(channel->owner,
+		      take(towire_channeld_splice_sending_sigs_reply(NULL)));
 }
 
 static void scid_updated(struct channel *channel)
@@ -1737,6 +1755,7 @@ static unsigned channel_msg(struct subd *sd, const u8 *msg, const int *fds)
 	case WIRE_CHANNELD_DEV_MEMLEAK:
 	case WIRE_CHANNELD_DEV_QUIESCE:
 	case WIRE_CHANNELD_GOT_INFLIGHT:
+	case WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY:
 	case WIRE_CHANNELD_DEV_PEER_SHACHAIN:
 		/* Replies go to requests. */
 	case WIRE_CHANNELD_OFFER_HTLC_REPLY:

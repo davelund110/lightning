@@ -258,6 +258,9 @@ msgdata,channeld_splice_confirmed_signed,output_index,u32,
 msgtype,channeld_splice_sending_sigs,7214
 msgdata,channeld_splice_sending_sigs,tx,bitcoin_txid,
 
+# master->channeld: Inflight saved, signatures can be sent
+msgtype,channeld_splice_sending_sigs_reply,7314
+
 # channeld->master: A feerate error has occured
 msgtype,channeld_splice_feerate_error,7215
 msgdata,channeld_splice_feerate_error,fee,amount_msat,

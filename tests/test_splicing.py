@@ -96,7 +96,7 @@ def test_splice_stored_feerate_repaired_on_upgrade(node_factory, bitcoind,
     # They are plain idempotent UPDATEs, so re-running them is safe.  The
     # count has to reach back past both of them, so it grows whenever a
     # migration is appended after them.
-    l1.db_manip("UPDATE version SET version = version - 3")
+    l1.db_manip("UPDATE version SET version = version - 4")
     l1.daemon.opts['database-upgrade'] = 'true'
     l1.start()
 
@@ -1309,6 +1309,214 @@ def test_splice_peer_aborts_after_tx_complete(node_factory, bitcoind):
     wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
     assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
     l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_peer_aborts_unsigned_after_reconnect(node_factory, bitcoind, executor):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    # l2 never gets l1's last tx_complete, so only l1 stores the inflight,
+    # with its signature on the shared input but no tx_signatures sent.
+    l1.stop()
+    l1.disconnect = ['$WIRE_TX_COMPLETE']
+    l1.daemon.opts['dev-disconnect'] = os.path.join(l1.daemon.lightning_dir,
+                                                    TEST_NETWORK, 'dev-disconnect')
+    l1.start()
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    l1.daemon.wait_for_log(r'billboard: Channel ready for use.')
+
+    funds_result = l1.rpc.addpsbtoutput(100000)
+    result = l1.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is False
+    executor.submit(l1.rpc.splice_update, chan_id, result['psbt'])
+    l1.daemon.wait_for_log(r'dev_disconnect: \$WIRE_TX_COMPLETE')
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 1)
+
+    assert l1.db_query("SELECT i_sent_sigs FROM channel_funding_inflights;")[0]['i_sent_sigs'] == 0
+    assert l2.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 0
+
+    # On reconnect l2 does not know the splice and answers with tx_abort.
+    l1.rpc.disconnect(l2.info['id'], force=True)
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel'
+                           r'|Peer permanent failure')
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 0)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_tx_abort_refused_with_their_sigs(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    splice_txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+    l1.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+    wait_for(lambda: splice_txid in bitcoind.rpc.getrawmempool())
+
+    # l1 holds both signatures, but its inflight says it neither sent nor
+    # received tx_signatures, as an older build could leave it.  l2 has
+    # forgotten the splice, so it answers l1's next_funding with tx_abort.
+    l1.stop()
+    l2.stop()
+    l1.db_manip("UPDATE channel_funding_inflights SET i_sent_sigs=0,"
+                " funding_tx_remote_sigs_received=0")
+    l2.db_manip("DELETE FROM htlc_sigs WHERE inflight_tx_id IS NOT NULL")
+    l2.db_manip("DELETE FROM channel_funding_inflights")
+    l2.db_manip("UPDATE channels SET state=3 WHERE state=13")
+    l2.start()
+    l1.start()
+
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'tx_abort is not allowed after I have sent my signature'
+                           r'|Restarting channeld after tx_abort')
+    assert l1.daemon.is_in_log(r'tx_abort is not allowed after I have sent my signature')
+    assert only_one(l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;"))['c'] == 1
+
+    # l2 has no record of the splice left to follow it onchain.
+    l2.stop()
+
+    # l1 keeps watching the splice, so its close of the splice output
+    # resolves as its own.
+    wait_for(lambda: len(bitcoind.rpc.getrawmempool()) == 2)
+    assert splice_txid in bitcoind.rpc.getrawmempool()
+    bitcoind.generate_block(1)
+    l1.daemon.wait_for_log(r'Splice candidate {}:[0-9]+ spent before splice_locked; adopting it'.format(splice_txid))
+    l1.daemon.wait_for_log(r'Resolved FUNDING_TRANSACTION/FUNDING_OUTPUT by OUR_UNILATERAL')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_sent_sigs_marked_on_upgrade(node_factory, bitcoind, executor):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True,
+                                           'dev-no-reconnect': None})
+    chan_id = l1.get_channel_id(l2)
+
+    # l2 withholds its tx_signatures, so l1 holds no signature of l2's.
+    l2.stop()
+    l2.disconnect = ['-WIRE_TX_SIGNATURES']
+    l2.daemon.opts['dev-disconnect'] = os.path.join(l2.daemon.lightning_dir,
+                                                    TEST_NETWORK, 'dev-disconnect')
+    l2.start()
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+
+    funds_result = l1.rpc.addpsbtoutput(100000)
+    result = l1.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    executor.submit(l1.rpc.splice_update, chan_id, result['psbt'])
+    l2.daemon.wait_for_log(r'dev_disconnect: -WIRE_TX_SIGNATURES')
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights"
+                                 " WHERE last_tx IS NOT NULL;")[0]['c'] == 1)
+    l1.stop()
+    l2.stop()
+
+    # An older release that had sent our tx_signatures here stored the same
+    # row, with i_sent_sigs still 0.  Rewind so the upgrade marks it.
+    row = only_one(l1.db_query("SELECT i_am_initiator, i_sent_sigs"
+                               " FROM channel_funding_inflights;"))
+    assert row['i_am_initiator'] == 1 and row['i_sent_sigs'] == 0
+    l1.db_manip("UPDATE version SET version = version - 1")
+    l1.daemon.opts['database-upgrade'] = 'true'
+
+    # l2 forgets the splice, so it answers l1's next_funding with tx_abort.
+    l2.db_manip("DELETE FROM htlc_sigs WHERE inflight_tx_id IS NOT NULL")
+    l2.db_manip("DELETE FROM channel_funding_inflights")
+    l2.db_manip("UPDATE channels SET state=3 WHERE state=13")
+    del l2.daemon.opts['dev-disconnect']
+    l2.start()
+    l1.start()
+    assert l1.daemon.is_in_log(r'Updating database from version')
+    assert only_one(l1.db_query("SELECT i_sent_sigs"
+                                " FROM channel_funding_inflights;"))['i_sent_sigs'] == 1
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'tx_abort is not allowed after I have sent my signature'
+                           r'|Restarting channeld after tx_abort')
+    assert l1.daemon.is_in_log(r'tx_abort is not allowed after I have sent my signature')
+    assert only_one(l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;"))['c'] == 1
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@pytest.mark.parametrize("l1_initiates", [True, False])
+def test_splice_sigs_sent_after_commit(node_factory, bitcoind, executor, l1_initiates):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts=[{'may_reconnect': True,
+                                            'may_fail': True,
+                                            'dev-splice-exit-before-sending-sigs': None},
+                                           {'may_reconnect': True}])
+    chan_id = l1.get_channel_id(l2)
+
+    # The initiator adds the shared input, so the accepter sends
+    # tx_signatures first: l1 sends second when it initiates, first when not.
+    if l1_initiates:
+        l2_log_start = len(l2.daemon.logs)
+        funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+        result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        result = l1.rpc.splice_update(chan_id, result['psbt'])
+        assert result['commitments_secured'] is True
+        result = l1.rpc.signpsbt(result['psbt'])
+        executor.submit(l1.rpc.splice_signed, chan_id, result['signed_psbt'])
+    else:
+        l1.rpc.xpay(l2.rpc.invoice(300000000, 'push', 'push')['bolt11'])
+        l2_log_start = len(l2.daemon.logs)
+        funds_result = l2.rpc.addpsbtoutput(100000)
+        result = l2.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+        result = l2.rpc.splice_update(chan_id, result['psbt'])
+        executor.submit(l2.rpc.splice_update, chan_id, result['psbt'])
+
+    # lightningd exits before replying, so channeld must not send.
+    l1.daemon.wait_for_log(r'dev-splice-exit-before-sending-sigs')
+    wait_for(lambda: l1.daemon.proc.poll() is not None)
+    time.sleep(1)
+    assert not l2.daemon.is_in_log(r'channeld-chan#[0-9]*: peer_in WIRE_TX_SIGNATURES',
+                                   start=l2_log_start)
+
+    del l1.daemon.opts['dev-splice-exit-before-sending-sigs']
+    l1.start()
+    l1.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+    l2.daemon.wait_for_log(r'peer_in WIRE_CHANNEL_REESTABLISH')
+
+    bitcoind.generate_block(6, wait_for_mempool=1)
+    l1.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+    l2.daemon.wait_for_log(r'CHANNELD_AWAITING_SPLICE to CHANNELD_NORMAL')
+
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-restart', 'after-restart')['bolt11'])
 
 
 @pytest.mark.openchannel('v1')
