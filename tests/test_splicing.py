@@ -1,6 +1,6 @@
 from fixtures import *  # noqa: F401,F403
-from pyln.client import RpcError
-from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND
+from pyln.client import LightningRpc, RpcError
+from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND, SLOW_MACHINE, VALGRIND
 import os
 import pytest
 import threading
@@ -2168,3 +2168,63 @@ def test_splice_locks_while_peer_awaits_sigs(node_factory, bitcoind):
     assert not l1.daemon.is_in_log('Peer permanent failure')
     assert not l2.daemon.is_in_log('Peer permanent failure')
     l1.rpc.xpay(l2.rpc.invoice(10000, 'after', 'after')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_stale_confirmed_stfu(node_factory, bitcoind):
+    """stfu_channels fails on one channel (it is mid-splice) before another
+    reports STFU, and a splice_init on that other channel gets in first.
+    The late STFU report belongs to nobody: a skip_stfu splice_init uses the
+    STFU, and anything else is refused and the STFU ended."""
+    # Long enough for the test to get its splice_init in first.
+    delay = 10 if VALGRIND or SLOW_MACHINE or os.getenv('ASAN', '0') == '1' else 3
+    l1, l2, l3 = node_factory.line_graph(3, fundamount=1000000, wait_for_announce=True,
+                                         opts=[{'dev-splice-warn-instead-of-sigs': None,
+                                                'may_reconnect': True,
+                                                'allow_warning': True},
+                                               {'dev-delay-confirmed-stfu': delay,
+                                                'may_reconnect': True,
+                                                'allow_warning': True},
+                                               {'may_reconnect': True,
+                                                'allow_warning': True}])
+    chan12 = l2.get_channel_id(l1)
+    chan23 = l2.get_channel_id(l3)
+    l2.fundwallet(500000, addrtype="p2tr")
+    splice_we_signed_first(l2, l1, bitcoind)
+    funds = l2.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    quiescent = r'{}-channeld-chan#[0-9]+: STFU complete: we are quiescent'.format(l3.info['id'])
+
+    def stfu_fails_on_chan12():
+        with pytest.raises(RpcError, match='splice is active'):
+            l2.rpc.stfu_channels([chan23, chan12])
+        # chan23 is quiescent now, but channeld hasn't said so yet.
+        l2.daemon.wait_for_log(quiescent)
+
+    # skip_stfu: this splice_init uses chan23's STFU.  (skip_stfu isn't in
+    # the schema, so don't validate against it.)
+    stfu_fails_on_chan12()
+    LightningRpc.call(l2.rpc, 'splice_init',
+                      {'channel_id': chan23, 'relative_amount': 100000,
+                       'initialpsbt': funds['psbt'], 'skip_stfu': True})
+    l2.daemon.wait_for_log(r'confirmed_stfu for a command which has gone:'
+                           r' a skip_stfu splice_init has the channel')
+    l2.rpc.abort_channels([chan23])
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
+
+    # Without it, channeld refuses the splice_init while in STFU, so we
+    # end the STFU ourselves.
+    stfu_fails_on_chan12()
+    with pytest.raises(RpcError, match="Can't begin a splice while currently in STFU"):
+        l2.rpc.splice_init(chan23, 100000, funds['psbt'])
+    l2.daemon.wait_for_log(r'confirmed_stfu for a command which has gone:'
+                           r' a splice command without skip_stfu has the channel,'
+                           r' aborting it')
+    l2.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL')
+
+    l2.rpc.unreserveinputs(funds['psbt'])
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels(l3.info['id'])['channels'])['peer_connected'])
+    l2.rpc.xpay(l3.rpc.invoice(10000, 'after', 'after')['bolt11'])

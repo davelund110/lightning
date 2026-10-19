@@ -388,6 +388,10 @@ struct lightningd {
 	 * channeld's own refusal can be tested. */
 	bool dev_splice_abort_after_sigs;
 
+	/* Have channeld wait this many seconds before reporting a requested
+	 * STFU, so a command can get in first. */
+	u32 dev_delay_confirmed_stfu;
+
 	/* Send a corrupted shared_input_signature, so the peer's check can
 	 * be tested. */
 	bool dev_splice_corrupt_shared_sig;

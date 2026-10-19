@@ -186,6 +186,9 @@ struct peer {
 	/* Signing second, send a warning instead of tx_signatures */
 	bool dev_splice_warn_instead_of_sigs;
 
+	/* Seconds to wait before reporting a requested STFU */
+	u32 dev_delay_confirmed_stfu;
+
 	/* Send a corrupted shared_input_signature */
 	bool dev_splice_corrupt_shared_sig;
 
@@ -5446,6 +5449,8 @@ static void handle_stfu_req_success(struct peer *peer)
 {
 	struct amount_msat available_funds = peer->channel->view->owed[LOCAL];
 	/* DTODO: Subtract reserve requirment from available_funds? */
+	if (peer->dev_delay_confirmed_stfu)
+		sleep(peer->dev_delay_confirmed_stfu);
 	wire_sync_write(MASTER_FD,
 			take(towire_channeld_confirmed_stfu(NULL,
 		   					    available_funds)));
@@ -7342,7 +7347,8 @@ static void init_channel(struct peer *peer)
 				    &peer->splice_state->inflights,
 				    &peer->local_alias,
 				    &peer->dev_splice_abort_at_tx_complete,
-				    &peer->dev_splice_warn_instead_of_sigs)) {
+				    &peer->dev_splice_warn_instead_of_sigs,
+				    &peer->dev_delay_confirmed_stfu)) {
 		master_badmsg(WIRE_CHANNELD_INIT, msg);
 	}
 

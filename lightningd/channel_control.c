@@ -49,6 +49,8 @@ struct splice_command {
 	/* For multi-channel commands: remaining channels awaiting response.
 	 * Allocated on ld -- free when finished. */
 	struct stfu_req_info *stfu_req_info;
+	/* A splice_init using the STFU some stfu_channels already got */
+	bool skip_stfu;
 };
 
 static u32 default_feerate(struct lightningd *ld, const struct channel *channel,
@@ -1610,11 +1612,21 @@ static void handle_confirmed_stfu(struct lightningd *ld,
 
 	cc = splice_command_for_chan(ld, channel);
 	/* e.g. stfu_channels failed on another of its channels before this
-	 * one got there: nobody will splice or abort it now, so leave STFU. */
-	if (!cc) {
+	 * one got there.  Only a splice_init with skip_stfu will use this
+	 * STFU: otherwise end it, as nothing else would until it times out.
+	 * channeld reads any splice command we already sent it before this
+	 * abort. */
+	if (!cc || !cc->stfu_req_info) {
 		log_unusual(channel->log, "confirmed_stfu for a command which"
-			    " has gone: aborting it");
-		subd_send_msg(channel->owner, take(towire_channeld_abort(NULL)));
+			    " has gone: %s",
+			    !cc ? "aborting it"
+			    : cc->skip_stfu ? "a skip_stfu splice_init has the"
+					      " channel"
+			    : "a splice command without skip_stfu has the"
+			      " channel, aborting it");
+		if (!cc || !cc->skip_stfu)
+			subd_send_msg(channel->owner,
+				      take(towire_channeld_abort(NULL)));
 		return;
 	}
 
@@ -2061,7 +2073,8 @@ bool peer_start_channeld(struct channel *channel,
 						   inflights),
 				       *channel->alias[LOCAL],
 				       ld->dev_splice_abort_at_tx_complete,
-				       ld->dev_splice_warn_instead_of_sigs);
+				       ld->dev_splice_warn_instead_of_sigs,
+				       ld->dev_delay_confirmed_stfu);
 
 	/* We don't expect a response: we are triggered by funding_depth_cb. */
 	subd_send_msg(channel->owner, take(initmsg));
@@ -2561,6 +2574,7 @@ static struct command_result *json_splice_init(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = *skip_stfu;
 	cc->user_psbt_ver = initialpsbt->version;
 
 	if (initialpsbt->version != 2 && !psbt_set_version(initialpsbt, 2))
@@ -2616,6 +2630,7 @@ static struct command_result *json_splice_update(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = false;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2655,6 +2670,7 @@ static struct command_result *single_splice_signed(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = false;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2803,6 +2819,7 @@ static struct command_result *json_stfu_channels(struct command *cmd,
 		cc->cmd = cmd;
 		cc->channel = channel;
 		cc->stfu_req_info = req;
+		cc->skip_stfu = false;
 
 		subd_send_msg(channel->owner, take(towire_channeld_stfu(NULL)));
 	}

@@ -931,6 +931,10 @@ static void dev_register_opts(struct lightningd *ld)
 		     &ld->dev_splice_abort_after_sigs,
 		     "Let abort_channels reach channeld after we sent"
 		     " tx_signatures");
+	clnopt_witharg("--dev-delay-confirmed-stfu", OPT_DEV|OPT_SHOWINT,
+		       opt_set_u32, opt_show_u32,
+		       &ld->dev_delay_confirmed_stfu,
+		       "Seconds to wait before reporting a requested STFU");
 	clnopt_noarg("--dev-splice-corrupt-shared-sig", OPT_DEV,
 		     opt_set_bool,
 		     &ld->dev_splice_corrupt_shared_sig,
