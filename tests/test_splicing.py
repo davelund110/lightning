@@ -1314,6 +1314,51 @@ def test_splice_peer_aborts_after_tx_complete(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_peer_aborts_unsigned_after_reconnect(node_factory, bitcoind, executor):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    # l2 never gets l1's last tx_complete, so only l1 stores the inflight,
+    # with its signature on the shared input but no tx_signatures sent.
+    l1.stop()
+    l1.disconnect = ['$WIRE_TX_COMPLETE']
+    l1.daemon.opts['dev-disconnect'] = os.path.join(l1.daemon.lightning_dir,
+                                                    TEST_NETWORK, 'dev-disconnect')
+    l1.start()
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    l1.daemon.wait_for_log(r'billboard: Channel ready for use.')
+
+    funds_result = l1.rpc.addpsbtoutput(100000)
+    result = l1.rpc.splice_init(chan_id, -105801, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is False
+    executor.submit(l1.rpc.splice_update, chan_id, result['psbt'])
+    l1.daemon.wait_for_log(r'dev_disconnect: \$WIRE_TX_COMPLETE')
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 1)
+
+    assert l1.db_query("SELECT i_sent_sigs FROM channel_funding_inflights;")[0]['i_sent_sigs'] == 0
+    assert l2.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 0
+
+    # On reconnect l2 does not know the splice and answers with tx_abort.
+    l1.rpc.disconnect(l2.info['id'], force=True)
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'Restarting channeld after tx_abort on CHANNELD_NORMAL channel'
+                           r'|Peer permanent failure')
+    assert not l1.daemon.is_in_log('Peer permanent failure')
+    assert not l2.daemon.is_in_log('Peer permanent failure')
+
+    wait_for(lambda: l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;")[0]['c'] == 0)
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['peer_connected'])
+    assert only_one(l1.rpc.listpeerchannels()['channels'])['state'] == 'CHANNELD_NORMAL'
+    l1.rpc.xpay(l2.rpc.invoice(10000, 'after-abort', 'after-abort')['bolt11'])
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_reserve_changes_at_reestablish(node_factory, bitcoind):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
                                      opts={'may_reconnect': True,
