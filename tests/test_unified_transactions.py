@@ -31,7 +31,7 @@ def assert_unified_witnesses(bitcoind, txid, minimum, anchors=True):
             continue
         for raw in wit:
             if is_signature(raw):
-                assert raw[-1] in (0x21, 0xa3), '0x%02x' % raw[-1]
+                assert raw[-1] == 0x21, '0x%02x' % raw[-1]
                 signatures.append(raw)
     assert len(signatures) >= minimum
     return tx

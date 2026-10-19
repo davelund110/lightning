@@ -2289,6 +2289,7 @@ static u8 *do_sign_remote_htlc_to_us(struct hsmd_client *c,
 	struct secret channel_seed, htlc_basepoint_secret;
 	struct pubkey htlc_basepoint;
 	struct privkey privkey;
+	enum sighash_type sighash_type;
 
 	tx->chainparams = c->chainparams;
 	get_channel_seed(peerid, channel_dbid, &channel_seed);
@@ -2311,10 +2312,18 @@ static u8 *do_sign_remote_htlc_to_us(struct hsmd_client *c,
 	 * * if `option_anchors` applies to this commitment transaction,
 	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used as described in [BOLT #5]
 	 */
-	return handle_sign_to_us_tx(
-	    c, msg_in, input_num, tx, &privkey, wscript,
-	    option_anchor_outputs ? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
-				  : SIGHASH_ALL);
+	sighash_type = option_anchor_outputs
+		? (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY)
+		: SIGHASH_ALL;
+
+	/* Nobody else signs this one, and lightningd signs it again for every
+	 * fee change, so a unified channel commits to the whole tx. */
+	if (input_num < tx->psbt->num_inputs
+	    && (tx->psbt->inputs[input_num].sighash & SIGHASH_UNIFIED))
+		sighash_type = SIGHASH_ALL;
+
+	return handle_sign_to_us_tx(c, msg_in, input_num, tx, &privkey,
+				    wscript, sighash_type);
 }
 
 /*~ When called by onchaind */

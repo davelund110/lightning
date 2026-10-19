@@ -769,15 +769,12 @@ static const struct bitcoin_tx *onchain_signing_tx(const struct bitcoin_tx *tx,
 	if (channel_type_has(info->channel->type, OPT_UNIFIED_SIGS)) {
 		/* Only needed until the caller serializes its HSM request. */
 		struct bitcoin_tx *copy = clone_bitcoin_tx(tmpctx, tx);
-		enum sighash_type base = SIGHASH_ALL;
-		/* Our half of an HTLC-success/timeout tx is SIGHASH_ALL too:
-		 * consider_onchain_htlc_tx_rebroadcast signs it again
-		 * whenever it adds fee inputs. */
-		if (channel_type_has_anchors(info->channel->type)
-		    && (info->msgtype == WIRE_ONCHAIND_SPEND_FULFILL
-			|| info->msgtype == WIRE_ONCHAIND_SPEND_HTLC_EXPIRED))
-			base = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY;
-		bitcoin_tx_require_unified(copy, 0, base);
+		/* Every signature here is ours alone, and is made again for
+		 * each fee change, so all are SIGHASH_ALL: our half of an
+		 * HTLC-success/timeout tx too, which
+		 * consider_onchain_htlc_tx_rebroadcast signs again whenever it
+		 * adds fee inputs. */
+		bitcoin_tx_require_unified(copy, 0, SIGHASH_ALL);
 		return copy;
 	}
 	return tx;
