@@ -1359,6 +1359,58 @@ def test_splice_peer_aborts_unsigned_after_reconnect(node_factory, bitcoind, exe
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_tx_abort_refused_with_their_sigs(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    splice_txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+    l1.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+    wait_for(lambda: splice_txid in bitcoind.rpc.getrawmempool())
+
+    # l1 holds both signatures, but its inflight says it neither sent nor
+    # received tx_signatures, as an older build could leave it.  l2 has
+    # forgotten the splice, so it answers l1's next_funding with tx_abort.
+    l1.stop()
+    l2.stop()
+    l1.db_manip("UPDATE channel_funding_inflights SET i_sent_sigs=0,"
+                " funding_tx_remote_sigs_received=0")
+    l2.db_manip("DELETE FROM htlc_sigs WHERE inflight_tx_id IS NOT NULL")
+    l2.db_manip("DELETE FROM channel_funding_inflights")
+    l2.db_manip("UPDATE channels SET state=3 WHERE state=13")
+    l2.start()
+    l1.start()
+
+    l1.daemon.wait_for_log(r'peer_in WIRE_TX_ABORT')
+    l1.daemon.wait_for_log(r'tx_abort is not allowed after I have sent my signature'
+                           r'|Restarting channeld after tx_abort')
+    assert l1.daemon.is_in_log(r'tx_abort is not allowed after I have sent my signature')
+    assert only_one(l1.db_query("SELECT count(*) as c FROM channel_funding_inflights;"))['c'] == 1
+
+    # l2 has no record of the splice left to follow it onchain.
+    l2.stop()
+
+    # l1 keeps watching the splice, so its close of the splice output
+    # resolves as its own.
+    wait_for(lambda: len(bitcoind.rpc.getrawmempool()) == 2)
+    assert splice_txid in bitcoind.rpc.getrawmempool()
+    bitcoind.generate_block(1)
+    l1.daemon.wait_for_log(r'Splice candidate {}:[0-9]+ spent before splice_locked; adopting it'.format(splice_txid))
+    l1.daemon.wait_for_log(r'Resolved FUNDING_TRANSACTION/FUNDING_OUTPUT by OUR_UNILATERAL')
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 @pytest.mark.parametrize("l1_initiates", [True, False])
 def test_splice_sigs_sent_after_commit(node_factory, bitcoind, executor, l1_initiates):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
