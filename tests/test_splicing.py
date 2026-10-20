@@ -1241,6 +1241,56 @@ def test_splice_unconfirmed_force_close_publishes_current(node_factory, bitcoind
                              r'Broadcasting txid {}'.format(inflight['scratch_txid'])])
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "modifies database, which is assumed sqlite3")
+def test_splice_force_close_uses_splice_remote_fundingkey(node_factory, bitcoind):
+    """A force close must sign a splice commitment with the splice's funding key.
+
+    A peer may give a new funding key in splice_init/splice_ack.  Until the
+    splice locks, the channel still holds the peer's old key, and signing the
+    splice's commitment with it gives a witness that can't spend the splice
+    output: a peer that withholds splice_locked leaves us no valid close.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     announce_channels=False,
+                                     opts={'may_reconnect': True,
+                                           'allow_warning': True})
+    chan_id = l1.get_channel_id(l2)
+
+    funds_result = l1.rpc.fundpsbt("109000sat", 0, 0, excess_as_change=True)
+    result = l1.rpc.splice_init(chan_id, 100000, funds_result['psbt'])
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is False
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    result = l1.rpc.signpsbt(result['psbt'])
+    splice_txid = l1.rpc.splice_signed(chan_id, result['signed_psbt'])['txid']
+    l1.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(' to CHANNELD_AWAITING_SPLICE')
+
+    # l2 withholds splice_locked while the splice confirms.
+    l2.stop()
+    bitcoind.generate_block(6, wait_for_mempool=splice_txid)
+
+    # CLN doesn't rotate its funding key, so make the channel's remote key
+    # differ from the splice's as if l2 had given a new one for the splice.
+    l1.stop()
+    l1.db_manip("UPDATE channels SET fundingkey_remote="
+                "X'0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'")
+    l1.start()
+
+    inflight = only_one(l1.rpc.dev_sign_last_tx(l2.info['id'])['inflights'])
+    assert inflight['funding_txid'] == splice_txid
+    commit_txid = bitcoind.rpc.decoderawtransaction(inflight['tx'])['txid']
+
+    l1.rpc.dev_fail(l2.info['id'])
+    l1.daemon.wait_for_log('Peer permanent failure')
+    bitcoind.generate_block(1, wait_for_mempool=commit_txid)
+    l1.daemon.wait_for_log(r'Resolved FUNDING_TRANSACTION/FUNDING_OUTPUT by OUR_UNILATERAL')
+
+
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_candidate_spent_before_lock(node_factory, bitcoind):
     """A confirmed splice output spent before splice_locked must be adopted.
