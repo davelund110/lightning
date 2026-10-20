@@ -53,10 +53,11 @@ bool next_funding_feerate(u32 last_feerate, u32 *next_feerate)
 	if (next > UINT_MAX)
 		return false;
 
-	/* Rounding down means feerates below 24 map back onto themselves,
-	 * and the rule requires strictly more to be a valid bump. */
+	/* Rounding down maps feerates below 24 back onto themselves, which
+	 * the rule allows but which can't replace anything: take one more,
+	 * or a funding tx made at one of these could never be replaced. */
 	if (next <= last_feerate)
-		return false;
+		next = last_feerate + 1;
 
 	*next_feerate = next;
 	return true;

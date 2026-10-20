@@ -34,6 +34,7 @@ struct inflight *fromwire_inflight(const tal_t *ctx, const u8 **cursor, size_t *
 		inflight->locked_scid = NULL;
 	}
 	inflight->i_sent_sigs = fromwire_bool(cursor, max);
+	inflight->feerate = fromwire_u32(cursor, max);
 
 	return inflight;
 }
@@ -57,4 +58,5 @@ void towire_inflight(u8 **pptr, const struct inflight *inflight)
 	if (inflight->locked_scid)
 		towire_short_channel_id(pptr, *inflight->locked_scid);
 	towire_bool(pptr, inflight->i_sent_sigs);
+	towire_u32(pptr, inflight->feerate);
 }

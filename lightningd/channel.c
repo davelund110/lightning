@@ -1257,6 +1257,16 @@ u32 channel_last_funding_feerate(const struct channel *channel)
 	return inflight->funding->feerate;
 }
 
+bool channel_has_pending_inflights(const struct channel *channel)
+{
+	struct channel_inflight *inflight;
+
+	list_for_each(&channel->inflights, inflight, list)
+		if (!inflight->splice_locked_memonly)
+			return true;
+	return false;
+}
+
 void channel_cleanup_commands(struct channel *channel, const char *why)
 {
 	if (channel->open_attempt) {

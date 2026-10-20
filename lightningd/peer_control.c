@@ -995,7 +995,6 @@ static void NON_NULL_ARGS(1, 2, 4, 5) json_add_channel(struct command *cmd,
 	struct amount_sat peer_funded_sats;
 	const struct peer_update *peer_update;
 	u32 feerate;
-	bool has_valid_inflights;
 
 	json_object_start(response, key);
 	json_add_node_id(response, "peer_id", &peer->id);
@@ -1084,15 +1083,7 @@ static void NON_NULL_ARGS(1, 2, 4, 5) json_add_channel(struct command *cmd,
 	json_add_txid(response, "funding_txid", &channel->funding.txid);
 	json_add_num(response, "funding_outnum", channel->funding.n);
 
-	has_valid_inflights = false;
-	if (!list_empty(&channel->inflights)) {
-		struct channel_inflight *inflight;
-		list_for_each(&channel->inflights, inflight, list)
-			if (!inflight->splice_locked_memonly)
-				has_valid_inflights = true;
-	}
-
-	if (has_valid_inflights) {
+	if (channel_has_pending_inflights(channel)) {
 		struct channel_inflight *initial, *inflight;
 		u32 last_feerate, next_feerate;
 

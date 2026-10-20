@@ -375,6 +375,23 @@ struct lightningd {
 	 * completes, so the initiator's handling of it can be tested. */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Let splice_init propose an RBF below 25/24 of the last feerate, so
+	 * the peer's refusal can be tested. */
+	bool dev_splice_rbf_any_feerate;
+
+	/* When we sign a splice second, send a warning instead of our
+	 * tx_signatures (a reconnect resends them), so the peer's handling
+	 * of a missing tx_signatures can be tested. */
+	bool dev_splice_warn_instead_of_sigs;
+
+	/* Let abort_channels reach channeld after we sent tx_signatures, so
+	 * channeld's own refusal can be tested. */
+	bool dev_splice_abort_after_sigs;
+
+	/* Have channeld wait this many seconds before reporting a requested
+	 * STFU, so a command can get in first. */
+	u32 dev_delay_confirmed_stfu;
+
 	/* Send a corrupted shared_input_signature, so the peer's check can
 	 * be tested. */
 	bool dev_splice_corrupt_shared_sig;

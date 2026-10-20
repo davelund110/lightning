@@ -183,6 +183,12 @@ struct peer {
 	/* Send tx_abort on every splice we accept, once it completes */
 	bool dev_splice_abort_at_tx_complete;
 
+	/* Signing second, send a warning instead of tx_signatures */
+	bool dev_splice_warn_instead_of_sigs;
+
+	/* Seconds to wait before reporting a requested STFU */
+	u32 dev_delay_confirmed_stfu;
+
 	/* Send a corrupted shared_input_signature */
 	bool dev_splice_corrupt_shared_sig;
 
@@ -4394,7 +4400,14 @@ static void resume_splice_negotiation(struct peer *peer,
 		master_wait_sync_reply(tmpctx, peer, take(msg),
 				       WIRE_CHANNELD_SPLICE_SENDING_SIGS_REPLY);
 
-		peer_write(peer->pps, sigmsg);
+		/* Only within a negotiation: a reestablish resends them */
+		if (peer->dev_splice_warn_instead_of_sigs && peer->splicing)
+			peer_write(peer->pps,
+				   take(towire_warningfmt(NULL,
+							  &peer->channel_id,
+							  "dev-splice-warn-instead-of-sigs")));
+		else
+			peer_write(peer->pps, sigmsg);
 		status_debug("Splice: we signed second");
 	}
 
@@ -4407,6 +4420,16 @@ static void resume_splice_negotiation(struct peer *peer,
 		if (our_role == TX_INITIATOR)
 			calc_weight(TX_INITIATOR, current_psbt, true);
 
+		final_tx = bitcoin_tx_with_psbt(tmpctx, current_psbt);
+		msg = towire_channeld_splice_confirmed_signed(tmpctx, final_tx,
+							      new_output_index);
+		wire_sync_write(MASTER_FD, take(msg));
+	} else if (recv_signature && inflight->i_sent_sigs
+		   && have_i_signed_inflight(peer, inflight)
+		   && have_they_signed_inflight(peer, inflight)) {
+		/* Ours went out before (e.g. before a reconnect), so this
+		 * completes it: tell lightningd we have their signatures. */
+		inflight->remote_tx_sigs = true;
 		final_tx = bitcoin_tx_with_psbt(tmpctx, current_psbt);
 		msg = towire_channeld_splice_confirmed_signed(tmpctx, final_tx,
 							      new_output_index);
@@ -4593,6 +4616,28 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 				 funding_feerate_perkw,
 				 accepted_feerate_max(peer));
 
+	/* BOLT #2:
+	 * The recipient:  ...
+	 *   - MUST respond with `tx_abort` if:
+	 *     - the `feerate` is not greater than or equal to 25/24 times `feerate`
+	 *       of the last successfully constructed transaction
+	 */
+	/* Unlike the bounds above, this is an honest disagreement a peer can
+	 * fix by retrying higher, so we tx_abort as required rather than
+	 * disconnect.  Like the other refusals below, splice_abort() waits
+	 * for the ack. */
+	if (type == WIRE_TX_INIT_RBF) {
+		u32 last_feerate = last_inflight(peer)->feerate;
+		u32 next_feerate_min;
+
+		if (!next_funding_feerate(last_feerate, &next_feerate_min)
+		    || funding_feerate_perkw < next_feerate_min)
+			splice_abort(peer, NULL,
+				     "RBF feerate_perkw %u is below 25/24 of"
+				     " the last splice feerate_perkw %u",
+				     funding_feerate_perkw, last_feerate);
+	}
+
 	peer->splicing->feerate_per_kw = funding_feerate_perkw;
 
 	/* TODO: Add plugin hook for user to adjust accepter amount */
@@ -4693,6 +4738,7 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 			       WIRE_CHANNELD_GOT_INFLIGHT);
 
 	new_inflight = inflights_new(peer);
+	peer->splicing->added_inflight = true;
 
 	psbt_txid(new_inflight, ictx->current_psbt,
 		  &new_inflight->outpoint.txid, NULL);
@@ -4707,6 +4753,7 @@ static void splice_accepter(struct peer *peer, const u8 *inmsg)
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
 	new_inflight->remote_tx_sigs = false;
+	new_inflight->feerate = funding_feerate_perkw;
 
 	current_push_val = relative_splice_balance_fundee(peer, our_role,ictx->current_psbt,
 					  outpoint.n, splice_funding_index);
@@ -4998,6 +5045,7 @@ static void splice_initiator_user_finalized(struct peer *peer)
 			       WIRE_CHANNELD_GOT_INFLIGHT);
 
 	new_inflight = inflights_new(peer);
+	peer->splicing->added_inflight = true;
 
 	psbt_txid(tmpctx, ictx->current_psbt, &new_inflight->outpoint.txid,
 		  NULL);
@@ -5011,6 +5059,7 @@ static void splice_initiator_user_finalized(struct peer *peer)
 	new_inflight->locked_scid = NULL;
 	new_inflight->i_sent_sigs = false;
 	new_inflight->remote_tx_sigs = false;
+	new_inflight->feerate = peer->splicing->feerate_per_kw;
 
 	audit_psbt(ictx->current_psbt, ictx->current_psbt);
 
@@ -5288,6 +5337,13 @@ static void handle_splice_stfu_success(struct peer *peer)
 	peer_write(peer->pps, take(msg));
 }
 
+/* Refusing it, we're not splicing after all */
+static void splice_init_refused(struct peer *peer, const u8 *msg TAKES)
+{
+	peer->splicing = tal_free(peer->splicing);
+	wire_sync_write(MASTER_FD, msg);
+}
+
 /* User has begun a splice with `splice_init` command. Here we request entry
  * into STFU mode, when we get it, send `splice` to our peer->
  * Later the peer will send `splice_ack` and the code that starts the actual
@@ -5320,14 +5376,14 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while waiting"
 							 " for STFU.");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (!skip_stfu && is_stfu_active(peer)) {
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while"
 							 " currently in STFU");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (skip_stfu && !is_stfu_active(peer)) {
@@ -5335,14 +5391,14 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 							 " splice with"
 							 " skip_stfu if not"
 							 " already in STFU");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (peer->splicing->mode) {
 		msg = towire_channeld_splice_state_error(NULL, "Can't begin a"
 							 " splice while already"
 							 " doing a splice.");
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	if (peer->splicing->feerate_per_kw < accepted_feerate_min(peer)) {
@@ -5353,7 +5409,7 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 							 " %u",
 							 peer->splicing->feerate_per_kw,
 							 accepted_feerate_min(peer)));
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 	/* We initiated, so this is our money: hold it to what we're
@@ -5369,7 +5425,7 @@ static void handle_splice_init(struct peer *peer, const u8 *inmsg)
 						 " %u",
 						 peer->splicing->feerate_per_kw,
 						 proposed_feerate_max(peer)));
-		wire_sync_write(MASTER_FD, take(msg));
+		splice_init_refused(peer, take(msg));
 		return;
 	}
 
@@ -5393,6 +5449,8 @@ static void handle_stfu_req_success(struct peer *peer)
 {
 	struct amount_msat available_funds = peer->channel->view->owed[LOCAL];
 	/* DTODO: Subtract reserve requirment from available_funds? */
+	if (peer->dev_delay_confirmed_stfu)
+		sleep(peer->dev_delay_confirmed_stfu);
 	wire_sync_write(MASTER_FD,
 			take(towire_channeld_confirmed_stfu(NULL,
 		   					    available_funds)));
@@ -5439,10 +5497,42 @@ static void handle_stfu_req(struct peer *peer, const u8 *inmsg)
 
 static void handle_abort_req(struct peer *peer, const u8 *inmsg)
 {
+	struct inflight *inflight = last_inflight(peer);
+
 	if (!fromwire_channeld_abort(inmsg))
 		master_badmsg(WIRE_CHANNELD_ABORT, inmsg);
 
-	splice_abort(peer, last_inflight(peer), "requested by user");
+	/* Only a candidate still being negotiated is ours to abort: the one
+	 * this negotiation added, or one a restart interrupted before we
+	 * signed it.  Anything else (e.g. the peer's splice, which an RBF
+	 * attempt sits on top of) is signed and must stay. */
+	if (peer->splicing) {
+		if (!peer->splicing->added_inflight)
+			inflight = NULL;
+		/* BOLT #2:
+		 * A sending node:
+		 *   - MUST NOT have already transmitted `tx_signatures`
+		 */
+		/* e.g. the peer sent a warning rather than its tx_signatures.
+		 * Reconnecting resumes the exchange, as aborting can't. */
+		else if (inflight->i_sent_sigs)
+			peer_failed_warn(peer->pps, &peer->channel_id,
+					 "Not aborting splice %s: we already"
+					 " sent tx_signatures, reconnecting to"
+					 " resume it",
+					 fmt_bitcoin_txid(tmpctx,
+							  &inflight->outpoint.txid));
+	} else if (inflight && (inflight->i_sent_sigs
+				|| have_i_signed_inflight(peer, inflight)))
+		inflight = NULL;
+
+	/* e.g. the peer's tx_abort already ended it, and we restarted */
+	if (!inflight && !peer->splicing && !is_entering_stfu(peer)) {
+		status_info("Abort requested with no splice in progress");
+		return;
+	}
+
+	splice_abort(peer, inflight, "requested by user");
 }
 
 static void peer_in(struct peer *peer, const u8 *msg)
@@ -7256,7 +7346,9 @@ static void init_channel(struct peer *peer)
 				    &pbases,
 				    &peer->splice_state->inflights,
 				    &peer->local_alias,
-				    &peer->dev_splice_abort_at_tx_complete)) {
+				    &peer->dev_splice_abort_at_tx_complete,
+				    &peer->dev_splice_warn_instead_of_sigs,
+				    &peer->dev_delay_confirmed_stfu)) {
 		master_badmsg(WIRE_CHANNELD_INIT, msg);
 	}
 

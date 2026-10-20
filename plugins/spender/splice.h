@@ -40,6 +40,9 @@ struct splice_cmd {
 	bool wetrun;
 	/* Feerate queried from lightningd */
 	u32 feerate_per_kw;
+	/* Least feerate that can replace a pending splice (BOLT #2: 25/24 of
+	 * the last), or 0 if none of our channels has one */
+	u32 rbf_min_feerate_per_kw;
 	/* Override max feerate */
 	bool force_feerate;
 	/* How many wallet inputs have we added to the psbt */

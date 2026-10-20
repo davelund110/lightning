@@ -49,6 +49,10 @@ struct splice_command {
 	/* For multi-channel commands: remaining channels awaiting response.
 	 * Allocated on ld -- free when finished. */
 	struct stfu_req_info *stfu_req_info;
+	/* A splice_init using the STFU some stfu_channels already got */
+	bool skip_stfu;
+	/* splice_signed: our broadcast of the splice answers it */
+	bool signing;
 };
 
 static u32 default_feerate(struct lightningd *ld, const struct channel *channel,
@@ -524,7 +528,21 @@ struct send_splice_info
 	u32 output_index;
 	const char *err_msg;
 	const struct wally_psbt *psbt;
+	/* The command pending when we broadcast, until it completes */
+	struct splice_command *cc;
 };
+
+static void clear_info_cc(struct splice_command *cc,
+			  struct send_splice_info *info)
+{
+	info->cc = NULL;
+}
+
+static void destroy_send_splice_info(struct send_splice_info *info)
+{
+	if (info->cc)
+		tal_del_destructor2(info->cc, clear_info_cc, info);
+}
 
 static void handle_tx_broadcast(struct send_splice_info *info)
 {
@@ -544,7 +562,7 @@ static void handle_tx_broadcast(struct send_splice_info *info)
 		wallet_transaction_add(ld->wallet, info->final_tx->wtx, 0, 0);
 	}
 
-	cc = splice_command_for_chan(ld, info->channel);
+	cc = info->cc;
 
 	if (cc) {
 		response = json_stream_success(cc->cmd);
@@ -565,11 +583,10 @@ static void check_utxo_block(struct bitcoind *bitcoind UNUSED,
 			     void *arg)
 {
 	struct send_splice_info *info = arg;
-	struct lightningd *ld = info->channel->peer->ld;
 	struct splice_command *cc;
 
 	if(!txout) {
-		cc = splice_command_for_chan(ld, info->channel);
+		cc = info->cc;
 		if (cc)
 			was_pending(command_fail(cc->cmd,
 						 SPLICE_BROADCAST_FAIL,
@@ -642,6 +659,10 @@ static void send_splice_tx(struct channel *channel,
 	info->output_index = output_index;
 	info->err_msg = NULL;
 	info->psbt = psbt;
+	info->cc = cc;
+	if (cc)
+		tal_add_destructor2(cc, clear_info_cc, info);
+	tal_add_destructor(info, destroy_send_splice_info);
 
 	bitcoind_sendrawtx(ld->topology->bitcoind,
 			   ld->topology->bitcoind,
@@ -691,7 +712,10 @@ static void handle_splice_confirmed_signed(struct lightningd *ld,
 		return;
 	}
 
+	/* Only a splice_signed waits on our broadcast */
 	cc = splice_command_for_chan(ld, channel);
+	if (cc && !cc->signing)
+		cc = NULL;
 
 	send_splice_tx(channel, tx, cc, output_index, inflight->funding_psbt);
 }
@@ -1052,6 +1076,7 @@ static void handle_update_inflight(struct lightningd *ld,
 	if (last_sig)
 		inflight->last_sig = *last_sig;
 
+	tal_free(inflight->locked_scid);
 	inflight->locked_scid = tal_steal(inflight, locked_scid);
 	if (inflight->i_sent_sigs && !i_sent_sigs)
 		log_broken(channel->log, "channeld tried to clear i_sent_sigs");
@@ -1608,10 +1633,22 @@ static void handle_confirmed_stfu(struct lightningd *ld,
 	}
 
 	cc = splice_command_for_chan(ld, channel);
-	if (!cc) {
-		channel_internal_error(channel, "confirmed_stfu"
-				       " received without an active command %s",
-				       tal_hex(channel, msg));
+	/* e.g. stfu_channels failed on another of its channels before this
+	 * one got there.  Only a splice_init with skip_stfu will use this
+	 * STFU: otherwise end it, as nothing else would until it times out.
+	 * channeld reads any splice command we already sent it before this
+	 * abort. */
+	if (!cc || !cc->stfu_req_info) {
+		log_unusual(channel->log, "confirmed_stfu for a command which"
+			    " has gone: %s",
+			    !cc ? "aborting it"
+			    : cc->skip_stfu ? "a skip_stfu splice_init has the"
+					      " channel"
+			    : "a splice command without skip_stfu has the"
+			      " channel, aborting it");
+		if (!cc || !cc->skip_stfu)
+			subd_send_msg(channel->owner,
+				      take(towire_channeld_abort(NULL)));
 		return;
 	}
 
@@ -1967,6 +2004,7 @@ bool peer_start_channeld(struct channel *channel,
 		infcopy->force_sign_first = inflight->force_sign_first;
 		infcopy->locked_scid = tal_dup_or_null(infcopy, struct short_channel_id, inflight->locked_scid);
 		infcopy->i_sent_sigs = inflight->i_sent_sigs;
+		infcopy->feerate = inflight->funding->feerate;
 
 		tal_wally_start();
 		wally_psbt_clone_alloc(inflight->funding_psbt, 0, &infcopy->psbt);
@@ -2056,7 +2094,9 @@ bool peer_start_channeld(struct channel *channel,
 				       cast_const2(const struct inflight **,
 						   inflights),
 				       *channel->alias[LOCAL],
-				       ld->dev_splice_abort_at_tx_complete);
+				       ld->dev_splice_abort_at_tx_complete,
+				       ld->dev_splice_warn_instead_of_sigs,
+				       ld->dev_delay_confirmed_stfu);
 
 	/* We don't expect a response: we are triggered by funding_depth_cb. */
 	subd_send_msg(channel->owner, take(initmsg));
@@ -2447,7 +2487,7 @@ static struct command_result *json_splice_init(struct command *cmd,
 	struct wally_psbt *initialpsbt;
 	s64 *relative_amount;
 	u32 *feerate_per_kw;
-	bool *force_feerate, *skip_stfu;
+	bool *force_feerate, *skip_stfu, explicit_feerate = false;
 	u8 *msg;
 
 	if (!param_check(cmd, buffer, params,
@@ -2478,13 +2518,63 @@ static struct command_result *json_splice_init(struct command *cmd,
 				    " close it and open a new one instead of"
 				    " splicing");
 
-	if (command_check_only(cmd))
-		return command_check_done(cmd);
-
 	if (!feerate_per_kw) {
 		feerate_per_kw = tal(cmd, u32);
 		*feerate_per_kw = splice_feerate(cmd->ld->topology, cmd->ld);
+	} else
+		explicit_feerate = true;
+
+	/* BOLT #2:
+	 * The sender:
+	 *   - MUST set `feerate` greater than or equal to 25/24 times the
+	 *     `feerate` of the previously constructed transaction, rounded
+	 *     down.
+	 */
+	/* As listpeerchannels' next_feerate, which the splice plugin uses */
+	if (channel_has_pending_inflights(channel)) {
+		u32 last_feerate = channel_last_funding_feerate(channel);
+		u32 next_feerate_min;
+
+		if (!next_funding_feerate(last_feerate, &next_feerate_min))
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Can't calculate the next feerate:"
+					    " the last splice feerate recorded"
+					    " for this channel (%u) is out of"
+					    " range",
+					    last_feerate);
+		/* As channeld would refuse it, but say why */
+		if (!*force_feerate
+		    && !channel->ignore_fee_limits
+		    && !cmd->ld->config.ignore_fee_limits
+		    && !cmd->ld->dev_splice_rbf_any_feerate
+		    && next_feerate_min > our_feerate_max(cmd->ld, NULL))
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Replacing the pending splice needs"
+					    " a feerate of at least %u perkw"
+					    " (25/24 of the last, %u), more"
+					    " than we'll pay (%u): set"
+					    " force_feerate to pay it anyway",
+					    next_feerate_min, last_feerate,
+					    our_feerate_max(cmd->ld, NULL));
+		if (*feerate_per_kw < next_feerate_min
+		    && !cmd->ld->dev_splice_rbf_any_feerate) {
+			if (explicit_feerate)
+				return command_fail(cmd,
+						    JSONRPC2_INVALID_PARAMS,
+						    "This replaces a pending"
+						    " splice, so the feerate"
+						    " must be at least %u perkw"
+						    " (25/24 of the last, %u):"
+						    " you proposed %u",
+						    next_feerate_min,
+						    last_feerate,
+						    *feerate_per_kw);
+			*feerate_per_kw = next_feerate_min;
+		}
 	}
+
+	if (command_check_only(cmd))
+		return command_check_done(cmd);
 
 	if (!initialpsbt)
 		initialpsbt = create_psbt(cmd, 0, 0, 0);
@@ -2506,6 +2596,8 @@ static struct command_result *json_splice_init(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = *skip_stfu;
+	cc->signing = false;
 	cc->user_psbt_ver = initialpsbt->version;
 
 	if (initialpsbt->version != 2 && !psbt_set_version(initialpsbt, 2))
@@ -2561,6 +2653,8 @@ static struct command_result *json_splice_update(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = false;
+	cc->signing = false;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2600,6 +2694,8 @@ static struct command_result *single_splice_signed(struct command *cmd,
 	cc->cmd = cmd;
 	cc->channel = channel;
 	cc->stfu_req_info = NULL;
+	cc->skip_stfu = false;
+	cc->signing = true;
 	cc->user_psbt_ver = psbt->version;
 
 	if (psbt->version != 2 && !psbt_set_version(psbt, 2))
@@ -2748,6 +2844,8 @@ static struct command_result *json_stfu_channels(struct command *cmd,
 		cc->cmd = cmd;
 		cc->channel = channel;
 		cc->stfu_req_info = req;
+		cc->skip_stfu = false;
+		cc->signing = false;
 
 		subd_send_msg(channel->owner, take(towire_channeld_stfu(NULL)));
 	}
@@ -2764,6 +2862,8 @@ static struct command_result *json_abort_channels(struct command *cmd,
 	struct channel *channel;
 	const jsmntok_t *channel_ids_tok, *channel_id_tok;
 	struct command_result *result;
+	struct json_stream *response;
+	char **refused;
 	size_t i;
 
 	if (!param_check(cmd, buffer, params,
@@ -2772,18 +2872,54 @@ static struct command_result *json_abort_channels(struct command *cmd,
 		return command_param_failed();
 
 	channels = tal_arr(cmd, struct channel*, 0);
+	refused = tal_arr(cmd, char *, 0);
 	json_for_each_arr(i, channel_id_tok, channel_ids_tok) {
+		struct channel_inflight *inflight;
+
 		result = param_channel_for_splice(cmd, NULL, buffer, channel_id_tok,
 						  &channel);
 		if (result)
 			return result;
+
+		/* BOLT #2:
+		 * A sending node:
+		 *   - MUST NOT have already transmitted `tx_signatures`
+		 */
+		inflight = channel_current_inflight(channel);
+		if (inflight && inflight->i_sent_sigs
+		    && !inflight->remote_tx_sigs
+		    && !cmd->ld->dev_splice_abort_after_sigs) {
+			tal_arr_expand(&refused,
+				       tal_fmt(refused,
+					       "Can't abort channel %s: we"
+					       " already sent tx_signatures for"
+					       " splice %s.  It completes when"
+					       " the peer sends theirs, which a"
+					       " reconnect asks for; if the peer"
+					       " never does, `close` the"
+					       " channel",
+					       fmt_channel_id(tmpctx,
+							      &channel->cid),
+					       fmt_bitcoin_txid(tmpctx,
+								&inflight->funding->outpoint.txid)));
+			continue;
+		}
 		tal_arr_expand(&channels, channel);
 	}
 
-	if (!tal_count(channels))
+	if (!tal_count(channels) && !tal_count(refused))
 		return command_fail_badparam(cmd, "channel_ids", buffer,
 					     channel_ids_tok,
 					     "Must specify a channel");
+
+	/* Nothing we can abort: say why */
+	if (!tal_count(channels)) {
+		/* tal_strjoin wants it NULL-terminated */
+		tal_arr_expand(&refused, NULL);
+		return command_fail(cmd, SPLICE_INVALID_CHANNEL_STATE, "%s",
+				    tal_strjoin(tmpctx, refused, "; ",
+						STR_NO_TRAIL));
+	}
 
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
@@ -2792,7 +2928,14 @@ static struct command_result *json_abort_channels(struct command *cmd,
 		subd_send_msg(channels[i]->owner,
 			      take(towire_channeld_abort(NULL)));
 
-	return command_success(cmd, json_stream_success(cmd));
+	response = json_stream_success(cmd);
+	if (tal_count(refused)) {
+		json_array_start(response, "refused");
+		for (i = 0; i < tal_count(refused); i++)
+			json_add_string(response, NULL, refused[i]);
+		json_array_end(response);
+	}
+	return command_success(cmd, response);
 }
 
 static const struct json_command splice_init_command = {

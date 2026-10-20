@@ -22,6 +22,8 @@ struct inflight {
 	bool force_sign_first;
 	struct short_channel_id *locked_scid;
 	bool i_sent_sigs;
+	/* The feerate the splice tx was negotiated at */
+	u32 feerate;
 };
 
 struct inflight *fromwire_inflight(const tal_t *ctx, const u8 **cursor, size_t *max);
