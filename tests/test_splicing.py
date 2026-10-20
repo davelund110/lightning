@@ -2334,7 +2334,7 @@ def test_splice_late_broadcast_skips_stfu_channels(node_factory, bitcoind, execu
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
-def test_splice_broadcast_skips_command_started_while_awaiting_sigs(node_factory, bitcoind, executor):
+def test_splice_broadcast_skips_cmd_awaiting_sigs(node_factory, bitcoind, executor):
     """l2 starts a splice while its channeld waits for l1's tx_signatures:
     l2's broadcast of l1's splice must not answer it."""
     # Keeps l2's stfu_channels pending until its broadcast has completed.
