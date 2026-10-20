@@ -46,7 +46,7 @@ gpg --verify SHA256SUMS-*.asc SHA256SUMS-*
 sha256sum -c SHA256SUMS-* --ignore-missing
 ```
 
-The signing key is `A47D 99B6 DB0D 715D 40C5 9A20 23AE 8A8E A7E2 4E38`.
+The signing key is `A47D 99B6 DB0D 715D 40C5 9A20 23AE 8A8E A7E2 4E38`. From `v26.06.9-blake2b.8` on, releases are signed by its subkey `1004 97C5 8727 107D 9B9D A0FA F160 CC14 F64F 8EF8`.
 
 For StartOS, the packaged build lives at [privkeyio/cln-startos](https://github.com/privkeyio/cln-startos).
 
