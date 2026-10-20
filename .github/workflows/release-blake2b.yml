@@ -1,0 +1,215 @@
+name: Release BLAKE2b
+
+# Builds the reproducible Ubuntu amd64 and arm64 tarballs for a
+# vX.Y.Z-blake2b.N tag and drafts its GitHub release with an unsigned
+# SHA256SUMS. The release captain rebuilds, signs SHA256SUMS with their own
+# key, uploads the .asc and publishes the draft by hand.
+on:
+  push:
+    tags:
+      - 'v*-blake2b.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag, e.g. v26.06.9-blake2b.8'
+        required: true
+      create_release:
+        description: Create a draft release
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/release-blake2b.yml'
+      - 'contrib/reprobuild/**'
+      - 'tools/build-release.sh'
+      - 'tools/repro-build*.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      mtime: ${{ steps.resolve.outputs.mtime }}
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve version and mtime
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+        run: |
+          # A tag push or a dispatch builds the tag's commit; a pull request
+          # builds its merge commit as a dry run.
+          case "$EVENT" in
+            push) VERSION="$REF_NAME"; RELEASE=true ;;
+            workflow_dispatch) VERSION="$INPUT_VERSION"; RELEASE="$CREATE_RELEASE" ;;
+            *) VERSION=$(git describe --tags --abbrev=7 HEAD); RELEASE=false ;;
+          esac
+          if [ "$EVENT" = pull_request ]; then
+            SHA=$(git rev-parse HEAD)
+          else
+            if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-blake2b\.[0-9]+$ ]]; then
+              echo "::error::'$VERSION' is not a vX.Y.Z-blake2b.N tag."
+              exit 1
+            fi
+            if ! SHA=$(git rev-parse --verify -q "refs/tags/$VERSION^{commit}"); then
+              echo "::error::Tag $VERSION does not exist."
+              exit 1
+            fi
+            if [ "$EVENT" = push ] && [ "$SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $VERSION does not point at the pushed commit."
+              exit 1
+            fi
+          fi
+          if [ "$RELEASE" = true ] && ! git merge-base --is-ancestor "$SHA" origin/blake2b-unified; then
+            echo "::error::$VERSION is not on blake2b-unified."
+            exit 1
+          fi
+          # The tarballs' file dates: the built commit's date in UTC, so
+          # anyone can rebuild them from the tag alone.
+          MTIME=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%d "$SHA")
+          echo "Version $VERSION, commit $SHA, mtime $MTIME, release $RELEASE"
+          {
+            echo "version=$VERSION"
+            echo "sha=$SHA"
+            echo "mtime=$MTIME"
+            echo "release=$RELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: 'bin-Ubuntu-jammy', runner: 'ubuntu-24.04', dir: 'release' }
+          - { target: 'bin-Ubuntu-noble', runner: 'ubuntu-24.04', dir: 'release' }
+          - { target: 'bin-Ubuntu-resolute', runner: 'ubuntu-24.04', dir: 'release' }
+          - { target: 'bin-Ubuntu-jammy-arm64', runner: 'ubuntu-24.04-arm', dir: 'release-arm64' }
+          - { target: 'bin-Ubuntu-noble-arm64', runner: 'ubuntu-24.04-arm', dir: 'release-arm64' }
+          - { target: 'bin-Ubuntu-resolute-arm64', runner: 'ubuntu-24.04-arm', dir: 'release-arm64' }
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build environment setup
+        run: |
+          distribution=$(echo "${{ matrix.target }}" | cut -d'-' -f3)
+          suffix=""
+          [ "$(dpkg --print-architecture)" = arm64 ] && suffix="-arm64"
+          sudo docker run --rm -v "$(pwd)":/build "ubuntu:$distribution" bash -c "\
+              apt-get update && \
+              apt-get install -y debootstrap && \
+              debootstrap $distribution /build/$distribution"
+          sudo tar -C "$distribution" -c . | docker import - "$distribution"
+          docker build -t "cl-repro-$distribution$suffix" - < "contrib/reprobuild/Dockerfile.$distribution"
+
+      - name: Build release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          MTIME: ${{ needs.version.outputs.mtime }}
+        run: tools/build-release.sh --without-zip --force-version "$VERSION" --force-mtime "$MTIME" ${{ matrix.target }}
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ matrix.dir }}/clightning-*.tar.xz
+          if-no-files-found: error
+
+  checksum:
+    name: Checksum
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: release/
+
+      - name: Checksum
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd release
+          set -- clightning-"$VERSION"-*.tar.xz
+          if [ $# -ne 6 ] || [ ! -e "$1" ] || [ "$(find . -type f | wc -l)" -ne 6 ]; then
+            echo "::error::Expected exactly 6 tarballs for $VERSION, found: $(ls)"
+            exit 1
+          fi
+          LC_ALL=C sha256sum "$@" > SHA256SUMS-"$VERSION"
+          cat SHA256SUMS-"$VERSION"
+          cp ../contrib/keys/privkeyio.txt privkeyio-signing-key.asc
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ needs.version.outputs.version }}
+          path: release/
+          if-no-files-found: error
+
+  draft:
+    name: Draft release
+    needs: [version, checksum]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release-draft-${{ needs.version.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.version.outputs.version }}
+          path: release/
+
+      # A release that already exists is left alone: it may already carry the
+      # captain's signature, so delete it by hand to draft it again.
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if out=$(gh release view "$VERSION" --json tagName 2>&1); then
+            echo "::error::Release $VERSION already exists."
+            exit 1
+          elif [ "$out" != "release not found" ]; then
+            echo "::error::Could not check for release $VERSION: $out"
+            exit 1
+          fi
+          cd release
+          gh release create "$VERSION" --draft --verify-tag --title "$VERSION" --notes "" \
+            clightning-"$VERSION"-*.tar.xz SHA256SUMS-"$VERSION" privkeyio-signing-key.asc
