@@ -1324,6 +1324,11 @@ static void handle_peer_splice_locked(struct channel *channel, const u8 *msg)
 	channel_watch_inflight_outs(channel->peer->ld, channel);
 
 	lockin_complete(channel, CHANNELD_AWAITING_SPLICE);
+
+	/* If max-independent-secrets was reached while the splice was
+	 * pending, the mutual close we held back can start now. */
+	if (channel_type_has(channel->type, OPT_INDEPENDENT_SECRETS))
+		check_independent_secrets_cap(channel);
 }
 
 /* We were informed by channeld that channel is ready (reached mindepth) */
