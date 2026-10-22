@@ -3177,8 +3177,11 @@ static void setup_peer(struct peer *peer)
 				watch_opening_inflight(ld, inflight);
 			break;
 
-		/* We need to watch all inflights which may splice */
+		/* We need to watch all inflights which may splice, and the
+		 * funding they spend: until one locks in, a commitment on it
+		 * can still be mined instead. */
 		case CHANNELD_AWAITING_SPLICE:
+			channel_watch_funding(ld, channel);
 			list_for_each(&channel->inflights, inflight, list)
 				watch_splice_inflight(ld, inflight);
 			break;
