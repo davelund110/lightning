@@ -3177,12 +3177,17 @@ static void setup_peer(struct peer *peer)
 				watch_opening_inflight(ld, inflight);
 			break;
 
-		/* We need to watch all inflights which may splice */
+		/* We need to watch all inflights which may splice, and the
+		 * funding they spend: until one locks in, a commitment on it
+		 * can still be mined instead. */
 		case CHANNELD_AWAITING_SPLICE:
+			channel_watch_funding(ld, channel);
 			list_for_each(&channel->inflights, inflight, list)
 				watch_splice_inflight(ld, inflight);
 			break;
 		}
+
+		channel_watch_inflight_outs(ld, channel);
 
 		/* Don't reconnect for private channels if --dev-no-reconnect-private */
 		if (!channel->peer->ld->reconnect_private
@@ -3194,8 +3199,6 @@ static void setup_peer(struct peer *peer)
 			connect = true;
 		if (channel_important_filter(channel, NULL))
 			important = true;
-
-		channel_watch_inflight_outs(ld, channel);
 	}
 
 	/* Make sure connectd knows to try reconnecting (unless

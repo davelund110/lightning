@@ -1336,6 +1336,49 @@ def test_splice_candidate_spent_before_lock(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
+def test_splice_restart_watches_funding_spend(node_factory, bitcoind):
+    """A restart with a splice unconfirmed must still watch the funding.
+
+    Until the splice confirms, a commitment spending the current funding can
+    be mined instead, so after a restart that output needs a spend watch as
+    well as the splice candidates.
+    """
+    l1, l2 = node_factory.line_graph(2, fundamount=1000000,
+                                     opts=[{'may_reconnect': True},
+                                           {'may_reconnect': True,
+                                            # We try to cheat!
+                                            'broken_log': r"onchaind-chan#[0-9]*: Could not find resolution for output .*: did \*we\* cheat\?"}])
+    chan_id = l1.get_channel_id(l2)
+
+    l1.pay(l2, 200000000)
+    revoked = l2.rpc.dev_sign_last_tx(l1.info['id'])['tx']
+    l2.pay(l1, 100000000)
+
+    # Fee-bump splice: no inputs, no payout.
+    result = l1.rpc.splice_init(chan_id, -5801)
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is False
+    result = l1.rpc.splice_update(chan_id, result['psbt'])
+    assert result['commitments_secured'] is True
+    splice_txid = l1.rpc.splice_signed(chan_id, result['psbt'])['txid']
+    l1.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    l2.daemon.wait_for_log(r'CHANNELD_NORMAL to CHANNELD_AWAITING_SPLICE')
+    wait_for(lambda: bitcoind.rpc.getrawmempool() == [splice_txid])
+
+    l1.restart()
+
+    # The revoked commitment is mined in place of the splice.
+    bitcoind.rpc.generateblock(bitcoind.rpc.getnewaddress(), [revoked])
+    assert splice_txid not in bitcoind.rpc.getrawmempool()
+
+    l1.daemon.wait_for_log('Resolved FUNDING_TRANSACTION/FUNDING_OUTPUT by THEIR_REVOKED_UNILATERAL')
+    l1.wait_for_onchaind_txs(('OUR_PENALTY_TX',
+                              'THEIR_REVOKED_UNILATERAL/DELAYED_CHEAT_OUTPUT_TO_THEM'))
+
+
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'elementsd doesnt yet support PSBT features we need')
 def test_splice_peer_aborts_after_tx_complete(node_factory, bitcoind):
     l1, l2 = node_factory.line_graph(2, fundamount=1000000, wait_for_announce=True,
                                      opts=[{'may_reconnect': True,
