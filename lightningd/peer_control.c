@@ -3187,6 +3187,8 @@ static void setup_peer(struct peer *peer)
 			break;
 		}
 
+		channel_watch_inflight_outs(ld, channel);
+
 		/* Don't reconnect for private channels if --dev-no-reconnect-private */
 		if (!channel->peer->ld->reconnect_private
 		    && !(channel->channel_flags & CHANNEL_FLAGS_ANNOUNCE_CHANNEL))
@@ -3197,8 +3199,6 @@ static void setup_peer(struct peer *peer)
 			connect = true;
 		if (channel_important_filter(channel, NULL))
 			important = true;
-
-		channel_watch_inflight_outs(ld, channel);
 	}
 
 	/* Make sure connectd knows to try reconnecting (unless
